@@ -1,0 +1,40 @@
+# Claude settings
+.claude/
+CLAUDE.md
+
+# Cursor settings
+.cursor/
+
+# VSCode settings
+.vscode/
+
+# Zig cache and build files
+.zig-cache/
+zig-out/
+
+# Sandbox files
+sandbox/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Backup files
+*~
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Text files
+*.txt
+
+# Build objects
+*.o
+*.obj
+*.exe
+*.dll
+*.lib
+*.a
+*.so

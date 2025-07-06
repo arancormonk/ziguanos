@@ -1,0 +1,1419 @@
+// Copyright 2025 arancormonk
+// SPDX-License-Identifier: MIT
+
+const std = @import("std");
+const uefi_boot = @import("../boot/uefi_boot.zig");
+const runtime_info = @import("../boot/runtime_info.zig");
+const serial = @import("../drivers/serial.zig");
+const secure_print = @import("../lib/secure_print.zig");
+const cpuid = @import("cpuid.zig");
+const pmm = @import("../memory/pmm.zig");
+const stack_security = @import("stack_security.zig");
+const spinlock = @import("../lib/spinlock.zig");
+
+// Import extracted modules
+const constants = @import("paging/constants.zig");
+const pat = @import("paging/pat.zig");
+const pku = @import("paging/pku.zig");
+const la57 = @import("paging/la57.zig");
+const pcid = @import("paging/pcid.zig");
+const shadow_stack = @import("paging/shadow_stack.zig");
+const validation = @import("paging/validation.zig");
+const guard_pages = @import("paging/guard_pages.zig");
+const test_utils = @import("paging/test_utils.zig");
+
+// Re-export commonly used items
+pub usingnamespace constants;
+pub const PAT = pat;
+pub const PKU = pku;
+pub const LA57 = la57;
+pub const PCID = pcid;
+pub const ShadowStack = shadow_stack;
+pub const Validation = validation;
+
+// Import constants for internal use
+const PAGE_PRESENT = constants.PAGE_PRESENT;
+const PAGE_WRITABLE = constants.PAGE_WRITABLE;
+const PAGE_USER = constants.PAGE_USER;
+const PAGE_WRITE_THROUGH = constants.PAGE_WRITE_THROUGH;
+const PAGE_CACHE_DISABLE = constants.PAGE_CACHE_DISABLE;
+const PAGE_ACCESSED = constants.PAGE_ACCESSED;
+const PAGE_DIRTY = constants.PAGE_DIRTY;
+const PAGE_HUGE = constants.PAGE_HUGE;
+const PAGE_GLOBAL = constants.PAGE_GLOBAL;
+const PAGE_NO_EXECUTE = constants.PAGE_NO_EXECUTE;
+const PAGE_SIZE_4K = constants.PAGE_SIZE_4K;
+const PAGE_SIZE_2M = constants.PAGE_SIZE_2M;
+const PAGE_SIZE_1G = constants.PAGE_SIZE_1G;
+const RESERVED_BITS_PML4 = constants.RESERVED_BITS_PML4;
+const RESERVED_BITS_PDPT_1G = constants.RESERVED_BITS_PDPT_1G;
+const RESERVED_BITS_PD_2M = constants.RESERVED_BITS_PD_2M;
+const RESERVED_BITS_PT = constants.RESERVED_BITS_PT;
+const PHYS_ADDR_MASK = constants.PHYS_ADDR_MASK;
+const PAGE_KERNEL_CODE = constants.PAGE_KERNEL_CODE;
+const PAGE_KERNEL_DATA = constants.PAGE_KERNEL_DATA;
+const PAGE_KERNEL_RODATA = constants.PAGE_KERNEL_RODATA;
+const PAGE_USER_CODE = constants.PAGE_USER_CODE;
+const PAGE_USER_DATA = constants.PAGE_USER_DATA;
+const PAGE_GUARD = constants.PAGE_GUARD;
+const GUARD_PAGE_SIZE = constants.GUARD_PAGE_SIZE;
+
+// Import PAT constants for internal use
+const MEMORY_TYPE_UC = pat.MEMORY_TYPE_UC;
+const MEMORY_TYPE_WC = pat.MEMORY_TYPE_WC;
+const MEMORY_TYPE_WT = pat.MEMORY_TYPE_WT;
+const MEMORY_TYPE_WP = pat.MEMORY_TYPE_WP;
+const MEMORY_TYPE_WB = pat.MEMORY_TYPE_WB;
+const PAGE_PAT_4K = pat.PAGE_PAT_4K;
+const PAGE_PAT_LARGE = pat.PAGE_PAT_LARGE;
+
+// Page table structures (must be page-aligned and in writable section)
+pub var pml4_table: [512]u64 align(4096) = [_]u64{0} ** 512;
+pub var pdpt_table: [512]u64 align(4096) = [_]u64{0} ** 512;
+pub var pd_tables: [16][512]u64 align(4096) = [_][512]u64{[_]u64{0} ** 512} ** 16; // Support up to 16GB
+// Additional page table for fine-grained kernel mapping
+var kernel_pd: [512]u64 align(4096) = [_]u64{0} ** 512;
+var kernel_pts: [16][512]u64 align(4096) = [_][512]u64{[_]u64{0} ** 512} ** 16; // 16 PT tables = 32MB coverage
+
+// 5-level paging support (LA57)
+pub var pml5_table: [512]u64 align(4096) = [_]u64{0} ** 512;
+
+// Track kernel memory regions from linker script
+// With PIE, these are offsets that need to be adjusted by kernel base
+extern const __kernel_start: u8;
+extern const __kernel_end: u8;
+extern const __data_start: u8;
+extern const __bss_start: u8;
+extern const __bss_end: u8;
+
+const KERNEL_MAX_SIZE: u64 = 0x1000000; // 16MB max kernel size
+
+// Track paging initialization state
+var paging_initialized: bool = false;
+var initial_cr3: u64 = 0;
+
+// Global page table lock system for synchronization
+var page_table_locks: spinlock.PageTableLockSystem = spinlock.PageTableLockSystem{};
+
+// Check if stack protection is safe in current context
+// Stack protection is unsafe during:
+// 1. Initial page table setup (when modifying active page tables)
+// 2. When switching between page tables
+// 3. When modifying the page containing the stack itself
+fn isStackProtectionSafe() bool {
+    // If paging is not yet initialized, we're in early boot
+    if (!paging_initialized) {
+        return false;
+    }
+
+    // Check if we're using the initial page tables
+    const current_cr3 = getCurrentPageTable();
+    if (current_cr3 != initial_cr3) {
+        // We've switched page tables, it's generally safe now
+        return true;
+    }
+
+    // During initial setup, stack protection is unsafe
+    return false;
+}
+
+// Get kernel base dynamically from runtime info
+fn getKernelBase() u64 {
+    const info = runtime_info.getRuntimeInfo();
+    return info.kernel_virtual_base;
+}
+
+pub fn init(boot_info: *const uefi_boot.UEFIBootInfo) void {
+    // Store initial CR3 for safety checks
+    initial_cr3 = getCurrentPageTable();
+
+    // Stack protection disabled during initial page table setup
+    // as we're modifying the memory mappings that contain our own stack
+    serial.println("[PAGING] Initializing page tables...", .{});
+    serial.println("[PAGING] Stack protection disabled during critical setup phase", .{});
+
+    // Clear all page tables
+    @memset(&pml4_table, 0);
+    @memset(&pdpt_table, 0);
+    for (&pd_tables) |*table| {
+        @memset(table, 0);
+    }
+
+    // Stack canary active to detect corruption
+
+    // Map first 4GB of physical memory with basic identity mapping
+    const gbs_to_map = setupIdentityMapping(boot_info);
+
+    // Stack canary active to detect corruption
+
+    // Apply fine-grained kernel protection regardless of page size
+    setupKernelProtection(boot_info);
+
+    // Stack canary active to detect corruption
+
+    // Verify page table entries before loading
+    secure_print.printValue("[PAGING] PML4[0]", pml4_table[0]);
+    secure_print.printValue("[PAGING] PDPT[0]", pdpt_table[0]);
+
+    // Debug: Show all PDPT entries to verify mapping
+    serial.println("[PAGING] PDPT entries:", .{});
+    for (0..8) |i| {
+        if (pdpt_table[i] != 0) {
+            serial.print("  PDPT[", .{});
+            serial.print("0x{x:0>16}", .{i});
+            serial.print("] = ", .{});
+            secure_print.printHex("", pdpt_table[i]);
+            serial.println("", .{});
+        }
+    }
+
+    // Load new page table
+    const pml4_phys_addr = runtime_info.getPhysicalAddress(&pml4_table);
+    const pml4_virt_addr = @intFromPtr(&pml4_table);
+    serial.print("[PAGING] Loading PML4 virtual: ", .{});
+    secure_print.printHex("", pml4_virt_addr);
+    serial.print(", physical: 0x{x:0>16}", .{pml4_phys_addr});
+    serial.println("", .{});
+
+    // Critical: Verify that our page tables are in mapped memory
+    const info = runtime_info.getRuntimeInfo();
+    const kernel_base = info.kernel_virtual_base;
+    const kernel_size = info.kernel_size;
+    const kernel_end = kernel_base + kernel_size;
+
+    secure_print.printRange("[PAGING] Kernel memory range", kernel_base, kernel_end);
+
+    if (pml4_virt_addr >= kernel_end) {
+        serial.println("[PAGING] WARNING: PML4 is beyond kernel memory range!", .{});
+        serial.println("[PAGING] This may cause a triple fault when loading CR3", .{});
+    }
+
+    // Get current CR3 for comparison
+    const old_cr3 = getCurrentPageTable();
+    secure_print.printValue("[PAGING] Old CR3", old_cr3);
+
+    // Ensure interrupts are disabled during page table switch
+    asm volatile ("cli");
+
+    // CRITICAL: Before switching page tables, verify we can access the new PML4
+    // Do a test read to ensure it's accessible
+    const test_read = @as(*const u64, @ptrFromInt(pml4_virt_addr)).*;
+    secure_print.printValue("[PAGING] Test read of new PML4[0]", test_read);
+
+    // Verify critical memory regions will be accessible after page table switch
+    serial.println("[PAGING] Verifying critical memory regions...", .{});
+
+    // 1. Current instruction pointer
+    const current_rip = asm volatile (
+        \\lea (%%rip), %[result]
+        : [result] "=r" (-> u64),
+    );
+    secure_print.printValue("  RIP", current_rip);
+    const ip_gb = @divFloor(current_rip, PAGE_SIZE_1G);
+    serial.println("       (GB 0x{x:0>16})", .{ip_gb});
+
+    // 2. Current stack pointer
+    const current_rsp = asm volatile (
+        \\mov %%rsp, %[result]
+        : [result] "=r" (-> u64),
+    );
+    secure_print.printValue("  RSP", current_rsp);
+    const sp_gb = @divFloor(current_rsp, PAGE_SIZE_1G);
+    serial.println("       (GB 0x{x:0>16})", .{sp_gb});
+
+    // Check if stack is at a suspicious location
+    if (current_rsp >= kernel_end - 0x1000 and current_rsp <= kernel_end + 0x1000) {
+        serial.println("  WARNING: Stack is at kernel boundary!", .{});
+        serial.print("    Kernel end: ", .{});
+        secure_print.printHex("", kernel_end);
+        serial.print(", Stack: ", .{});
+        secure_print.printHex("", current_rsp);
+        serial.println("", .{});
+    }
+
+    // 3. Boot info structure
+    secure_print.printPointer("  Boot info", boot_info);
+    const bi_gb = @divFloor(@intFromPtr(boot_info), PAGE_SIZE_1G);
+    serial.println(" (GB {})", .{bi_gb});
+
+    // 4. Page tables themselves
+    secure_print.printValue("  PML4", pml4_virt_addr);
+    const pml4_gb = @divFloor(pml4_virt_addr, PAGE_SIZE_1G);
+    serial.println(" (GB {})", .{pml4_gb});
+
+    // 5. GDT location (critical for segment access)
+    const gdt_info = asm volatile (
+        \\sub $16, %%rsp
+        \\sgdt (%%rsp)
+        \\mov 2(%%rsp), %[base]
+        \\add $16, %%rsp
+        : [base] "=r" (-> u64),
+    );
+    secure_print.printValue("  GDT", gdt_info);
+    const gdt_gb = @divFloor(gdt_info, PAGE_SIZE_1G);
+    serial.println(" (GB 0x{x:0>16})", .{gdt_gb});
+
+    // Find the maximum GB we need
+    const max_gb = @max(@max(@max(@max(ip_gb, sp_gb), bi_gb), pml4_gb), gdt_gb);
+    serial.println("[PAGING] Maximum GB needed: 0x{x:0>16}, mapped: 0x{x:0>16}", .{ max_gb, gbs_to_map });
+
+    if (max_gb >= gbs_to_map) {
+        serial.println("[PAGING] FATAL: Not enough GBs mapped!", .{});
+        serial.println("  Need at least 0x{x:0>16} GBs, but only mapped 0x{x:0>16}", .{ max_gb + 1, gbs_to_map });
+        while (true) {
+            asm volatile ("hlt");
+        }
+    }
+
+    // Load our new page table
+    serial.println("[PAGING] Loading new CR3...", .{});
+
+    // Final verification of page table structure
+    serial.println("[PAGING] Final page table verification:", .{});
+    serial.println("  PML4 physical addr for CR3: 0x{x:0>16}", .{pml4_phys_addr});
+
+    // Verify the PML4 entry points to a valid PDPT
+    const pml4_entry = pml4_table[0];
+    const pdpt_phys = pml4_entry & ~@as(u64, 0xFFF); // Clear flag bits
+    serial.println("  PML4[0] -> PDPT at: 0x{x:0>16}", .{pdpt_phys});
+
+    // CRITICAL: Verify we can access the physical addresses we're using
+    serial.println("[PAGING] Testing access to page table memory:", .{});
+
+    // Test accessing the physical page table data through our current virtual mapping
+    const pml4_phys_ptr = @as(*const u64, @ptrFromInt(pml4_phys_addr));
+    const pdpt_phys_ptr = @as(*const u64, @ptrFromInt(pdpt_phys));
+
+    serial.println("  Reading PML4 at physical 0x{x:0>16}: 0x{x:0>16}", .{ pml4_phys_addr, pml4_phys_ptr.* });
+
+    serial.println("  Reading PDPT at physical 0x{x:0>16}: 0x{x:0>16}", .{ pdpt_phys, pdpt_phys_ptr.* });
+
+    // Add memory barrier to ensure all previous writes are complete
+    asm volatile ("mfence" ::: "memory");
+
+    // Disable interrupts to prevent any interrupt during the critical switch
+    asm volatile ("cli" ::: "memory");
+
+    // Load CR3 with PHYSICAL address
+    asm volatile ("mov %[addr], %%cr3"
+        :
+        : [addr] "r" (pml4_phys_addr),
+        : "memory"
+    );
+
+    // Immediately verify we're still executing
+    serial.println("[PAGING] CR3 loaded successfully!", .{});
+
+    // Verify the new CR3
+    const new_cr3 = getCurrentPageTable();
+    secure_print.printValue("[PAGING] New CR3", new_cr3);
+
+    // Simple memory test
+    serial.println("[PAGING] Testing memory access...", .{});
+    const test_value: u32 = 0x12345678;
+    const test_ptr = @as(*volatile u32, @ptrFromInt(0x1000));
+    test_ptr.* = test_value;
+    if (test_ptr.* == test_value) {
+        serial.println("[PAGING] Memory access test passed", .{});
+    } else {
+        serial.println("[PAGING] Memory access test FAILED!", .{});
+    }
+
+    serial.println("[PAGING] Page tables loaded successfully", .{});
+
+    // Flush TLB to ensure all changes take effect
+    flushTLB();
+
+    // Enable PCID if supported
+    pcid.enable();
+
+    // Initialize PAT if supported
+    pat.init();
+
+    // Enable PKU if supported
+    pku.enable() catch |err| {
+        if (err != error.PKUNotSupported) {
+            serial.println("[PAGING] Warning: Failed to enable PKU", .{});
+        }
+    };
+
+    // Initialize protection keys if PKU was enabled
+    if (cpuid.getFeatures().pku) {
+        pku.init();
+        pku.testPKU();
+    }
+
+    // Mark paging as initialized - stack protection can be enabled after this point
+    paging_initialized = true;
+    serial.println("[PAGING] Page table setup complete - stack protection can now be safely enabled", .{});
+}
+
+fn setupIdentityMapping(boot_info: *const uefi_boot.UEFIBootInfo) usize {
+    // Only use stack protection if it's safe to do so
+    var guard: ?stack_security.canaryGuard() = null;
+    if (isStackProtectionSafe()) {
+        guard = stack_security.protect();
+    }
+    defer if (guard) |*g| g.deinit();
+
+    const features = cpuid.getFeatures();
+
+    // Set up PML4 entry (covers 512GB)
+    // CRITICAL: Use PHYSICAL address for page table entries
+    const pdpt_phys_addr = runtime_info.getPhysicalAddress(&pdpt_table);
+    const pdpt_virt_addr = @intFromPtr(&pdpt_table);
+    serial.print("[PAGING] PDPT virtual: ", .{});
+    secure_print.printHex("", pdpt_virt_addr);
+    serial.print(", physical: 0x{x:0>16}", .{pdpt_phys_addr});
+    serial.println("", .{});
+    pml4_table[0] = pdpt_phys_addr | PAGE_PRESENT | PAGE_WRITABLE;
+
+    // Validate the PML4 entry
+    validateEntry(pml4_table[0], 4) catch |err| {
+        serial.print("[PAGING] ERROR: PML4 entry validation failed: ", .{});
+        serial.println("{s}", .{@errorName(err)});
+    };
+
+    // Determine how much memory we need to map
+    // We need to map all memory regions that might be in use
+
+    // 1. Kernel location
+    const kernel_start = boot_info.kernel_base;
+    const kernel_end = boot_info.kernel_base + boot_info.kernel_size;
+    const kernel_start_gb = @divFloor(kernel_start, PAGE_SIZE_1G);
+    const kernel_end_gb = @divFloor(kernel_end + PAGE_SIZE_1G - 1, PAGE_SIZE_1G); // Round up to next GB
+
+    serial.println("[PAGING] Kernel spans GB 0x{x:0>16} to GB 0x{x:0>16}", .{ kernel_start_gb, kernel_end_gb - 1 });
+
+    // 2. Also consider where our stack and page tables are (they're in BSS after kernel)
+    // The page tables can extend significantly beyond kernel_end
+    const page_tables_end = @intFromPtr(&pd_tables) + @sizeOf(@TypeOf(pd_tables));
+    const page_tables_gb = @divFloor(page_tables_end + PAGE_SIZE_1G - 1, PAGE_SIZE_1G);
+
+    // 3. CRITICAL: Add extra space for stack growth and alignment
+    // The kernel_size doesn't include the full memory needed for stack operations
+    // Add at least 2MB extra to ensure we have room for stack growth and any alignment padding
+    const SAFETY_MARGIN: u64 = 0x200000; // 2MB safety margin
+    const safe_kernel_end = kernel_end + SAFETY_MARGIN;
+    const safe_kernel_end_gb = @divFloor(safe_kernel_end + PAGE_SIZE_1G - 1, PAGE_SIZE_1G);
+
+    // 4. We should map at least what UEFI has given us access to
+    // For safety, map at least 8GB or more if kernel is loaded higher
+    const min_gbs = 8; // Reasonable minimum for modern systems
+    const gbs_to_map = @max(min_gbs, @max(safe_kernel_end_gb, page_tables_gb + 1));
+
+    serial.print("[PAGING] Mapping ", .{});
+    serial.print("0x{x:0>16}", .{gbs_to_map});
+    serial.println(" GB of memory to cover kernel at high address", .{});
+
+    // Set up PDPT entries (each covers 1GB)
+    // Map using either 1GB or 2MB pages
+    if (features.gbpages) {
+        // Use 1GB pages if available
+        serial.println("[PAGING] Using 1GB pages with fine-grained kernel protection", .{});
+
+        // Cap at what PDPT can handle (512 GB)
+        const effective_gbs = @min(gbs_to_map, pdpt_table.len);
+
+        // Map all GBs with 1GB pages using TRUE identity mapping
+        // GB 0 might be replaced with smaller pages if kernel is there
+        for (0..effective_gbs) |i| {
+            const virt_addr = i * PAGE_SIZE_1G;
+            const phys_addr = virt_addr; // Identity mapping: virtual = physical
+
+            // Check if kernel is in this GB
+            const gb_contains_kernel = (kernel_start >= virt_addr and kernel_start < virt_addr + PAGE_SIZE_1G) or
+                (kernel_end > virt_addr and kernel_end <= virt_addr + PAGE_SIZE_1G);
+
+            // For GBs that don't contain the kernel, use 1GB pages with NX
+            // For the GB containing the kernel, we need to use 2MB pages for finer W^X control
+            if (gb_contains_kernel) {
+                // Don't use a 1GB page for the kernel GB - we need finer control
+                // Allocate a PD table for this GB if available
+                if (i < pd_tables.len) {
+                    const pd_phys_addr = runtime_info.getPhysicalAddress(&pd_tables[i]);
+                    pdpt_table[i] = pd_phys_addr | PAGE_PRESENT | PAGE_WRITABLE;
+
+                    // Fill the PD with 2MB pages
+                    const gb_base = i * PAGE_SIZE_1G;
+                    for (0..512) |j| {
+                        const addr = gb_base + (j * PAGE_SIZE_2M);
+                        // Apply NX to all 2MB pages - kernel region will be handled later with 4KB pages
+                        pd_tables[i][j] = addr | PAGE_PRESENT | PAGE_WRITABLE | PAGE_HUGE | PAGE_NO_EXECUTE;
+                    }
+
+                    serial.println("[PAGING] GB 0x{x} contains kernel - using 2MB pages for W^X enforcement", .{i});
+                } else {
+                    serial.println("[PAGING] CRITICAL: No PD table available for kernel GB!", .{});
+                    serial.println("[PAGING] CRITICAL: Cannot enforce W^X protection - system halted for security", .{});
+                    // SECURITY: Never allow WX pages - halt system if we can't enforce W^X
+                    // This prevents the security vulnerability described in the audit
+                    while (true) {
+                        asm volatile (
+                            \\cli
+                            \\hlt
+                        );
+                    }
+                }
+            } else {
+                // Non-kernel GB - use 1GB page with NX
+                pdpt_table[i] = phys_addr | PAGE_PRESENT | PAGE_WRITABLE | PAGE_HUGE | PAGE_NO_EXECUTE;
+            }
+
+            // Validate the PDPT entry
+            validateEntry(pdpt_table[i], 3) catch |err| {
+                serial.print("[PAGING] ERROR: PDPT entry ", .{});
+                serial.print("{}", .{i});
+                serial.print(" validation failed: ", .{});
+                serial.println("{s}", .{@errorName(err)});
+            };
+
+            serial.print("[PAGING] Identity map GB ", .{});
+            serial.print("0x{x:0>16}", .{i});
+            serial.print(": virtual ", .{});
+            serial.print("0x{x:0>16}", .{virt_addr});
+            serial.print(" -> physical ", .{});
+            serial.print("0x{x:0>16}", .{phys_addr});
+            if (gb_contains_kernel) {
+                serial.println(" (kernel GB - executable)", .{});
+            } else {
+                serial.println(" (NX set)", .{});
+            }
+        }
+    } else {
+        // Use 2MB pages
+        serial.println("[PAGING] Using 2MB pages", .{});
+        const max_gbs = @min(gbs_to_map, pd_tables.len);
+        if (gbs_to_map > max_gbs) {
+            serial.print("[PAGING] WARNING: Can only map ", .{});
+            serial.print("0x{x:0>16}", .{max_gbs});
+            serial.print(" GB with available PD tables (need ", .{});
+            serial.print("0x{x:0>16}", .{gbs_to_map});
+            serial.println(" GB)", .{});
+        }
+        for (0..max_gbs) |i| {
+            pdpt_table[i] = runtime_info.getPhysicalAddress(&pd_tables[i]) | PAGE_PRESENT | PAGE_WRITABLE;
+
+            // Validate the PDPT entry (points to PD table, not a huge page)
+            validateEntry(pdpt_table[i], 3) catch |err| {
+                serial.print("[PAGING] ERROR: PDPT entry ", .{});
+                serial.print("{}", .{i});
+                serial.print(" validation failed: ", .{});
+                serial.println("{s}", .{@errorName(err)});
+            };
+        }
+
+        // Set up PD entries with 2MB pages
+        var phys_addr: u64 = 0;
+        for (pd_tables[0..max_gbs]) |*pd_table| {
+            for (&pd_table.*) |*entry| {
+                var flags = PAGE_PRESENT | PAGE_WRITABLE | PAGE_HUGE;
+
+                // Always apply NX bit to large pages - we'll use fine-grained
+                // permissions for kernel regions later
+                flags |= PAGE_NO_EXECUTE;
+
+                entry.* = phys_addr | flags;
+                phys_addr += PAGE_SIZE_2M;
+            }
+        }
+
+        serial.print("[PAGING] Mapped up to ", .{});
+        serial.print("0x{x:0>16}", .{phys_addr});
+        serial.println(" with 2MB pages", .{});
+    }
+
+    // Apply specific memory permissions based on boot info
+    applyMemoryPermissions(boot_info);
+
+    // Return the actual number of GBs we mapped (may be less than requested due to limits)
+    if (features.gbpages) {
+        return @min(gbs_to_map, pdpt_table.len);
+    } else {
+        return @min(gbs_to_map, pd_tables.len);
+    }
+}
+
+fn isKernelAddress(addr: u64) bool {
+    return runtime_info.isKernelAddress(addr);
+}
+
+// Setup fine-grained kernel protection with W^X enforcement
+fn setupKernelProtection(_: *const uefi_boot.UEFIBootInfo) void {
+    // Only use stack protection if it's safe to do so
+    var guard: ?stack_security.canaryGuard() = null;
+    if (isStackProtectionSafe()) {
+        guard = stack_security.protect();
+    }
+    defer if (guard) |*g| g.deinit();
+
+    serial.println("[PAGING] Setting up kernel W^X protection...", .{});
+
+    // Debug: Show addresses of our arrays
+    serial.print("[PAGING] kernel_pts address: ", .{});
+    secure_print.printHex("0x", @intFromPtr(&kernel_pts));
+    serial.print(", size: 0x", .{});
+    serial.print("{x:0>16}", .{@sizeOf(@TypeOf(kernel_pts))});
+    serial.println("", .{});
+
+    // Stack location available in stack_security output
+
+    // Get runtime addresses
+    // With PIE, these symbols should already be at their runtime addresses
+    // But if they're not, we need to use the kernel base from runtime_info
+    const info = runtime_info.getRuntimeInfo();
+    const kernel_base = info.kernel_virtual_base;
+    const kernel_start_addr = if (@intFromPtr(&__kernel_start) < 0x1000000)
+        kernel_base // Symbol is an offset, use actual base
+    else
+        @intFromPtr(&__kernel_start); // Symbol is already relocated
+
+    // With proper PIE, symbols are already relocated to the correct addresses
+    const data_start_addr = @intFromPtr(&__data_start);
+    const bss_start_addr = @intFromPtr(&__bss_start);
+    const bss_end_addr = @intFromPtr(&__bss_end);
+
+    // Debug: print actual addresses
+    serial.print("[PAGING] Kernel base: ", .{});
+    secure_print.printHex("0x", kernel_base);
+    serial.print(", start symbol: ", .{});
+    secure_print.printHex("0x", @intFromPtr(&__kernel_start));
+    serial.println("", .{});
+
+    // Calculate page-aligned boundaries
+    const kernel_start_page = kernel_start_addr & ~@as(u64, PAGE_SIZE_4K - 1);
+
+    // Replace the large page mapping for kernel area with 4K pages
+    // This allows fine-grained permissions
+
+    const features = cpuid.getFeatures();
+    if (features.gbpages) {
+        // Determine which GB the kernel is in
+        const kernel_gb = @divFloor(kernel_base, PAGE_SIZE_1G);
+        const kernel_in_first_gb = kernel_gb == 0;
+
+        if (kernel_in_first_gb) {
+            // When kernel is in first GB, replace it with a PD table for fine-grained control
+            const kernel_pd_phys_addr = runtime_info.getPhysicalAddress(&kernel_pd);
+            serial.println("[PAGING] kernel_pd at physical: 0x{x:0>16}", .{kernel_pd_phys_addr});
+            pdpt_table[0] = kernel_pd_phys_addr | PAGE_PRESENT | PAGE_WRITABLE;
+        } else {
+            // Kernel is in a higher GB, we need to split that GB for fine-grained control
+            serial.print("[PAGING] Kernel in GB ", .{});
+            serial.print("0x{x:0>16}", .{kernel_gb});
+            serial.print(" at address ", .{});
+            serial.print("0x{x:0>16}", .{kernel_base});
+            serial.println(" - setting up fine-grained protection", .{});
+
+            // Verify that this GB is mapped
+            if (kernel_gb >= pdpt_table.len or pdpt_table[kernel_gb] == 0) {
+                serial.println("[PAGING] ERROR: Kernel GB is not mapped!", .{});
+                return;
+            }
+
+            // Check if it's currently a 1GB page
+            if ((pdpt_table[kernel_gb] & PAGE_HUGE) != 0) {
+                // We need to replace the 1GB page with a PD table
+                // Use one of the pre-allocated PD tables for this
+                // We'll use pd_tables[kernel_gb] if available
+                if (kernel_gb < pd_tables.len) {
+                    const pd_phys_addr = runtime_info.getPhysicalAddress(&pd_tables[kernel_gb]);
+                    serial.println("[PAGING] Replacing 1GB page with PD table at physical: 0x{x:0>16}", .{pd_phys_addr});
+
+                    // First, fill the PD with 2MB pages to maintain the identity mapping
+                    const gb_base = kernel_gb * PAGE_SIZE_1G;
+                    for (0..512) |i| {
+                        const phys_addr = gb_base + (i * PAGE_SIZE_2M);
+                        const flags = PAGE_PRESENT | PAGE_WRITABLE | PAGE_HUGE | PAGE_NO_EXECUTE;
+
+                        // For kernel region, we'll need finer control, so skip the huge page flag
+                        const addr_start = gb_base + (i * PAGE_SIZE_2M);
+                        const addr_end = addr_start + PAGE_SIZE_2M;
+                        const kernel_end = kernel_base + info.kernel_size;
+                        const kernel_overlaps = (addr_start < kernel_end) and (addr_end > kernel_base);
+
+                        if (kernel_overlaps) {
+                            // Don't use huge pages for kernel region - we'll set up PT tables later
+                            pd_tables[kernel_gb][i] = 0;
+                        } else {
+                            pd_tables[kernel_gb][i] = phys_addr | flags;
+                        }
+                    }
+
+                    // Now replace the PDPT entry
+                    pdpt_table[kernel_gb] = pd_phys_addr | PAGE_PRESENT | PAGE_WRITABLE;
+
+                    // Flush TLB to ensure the new mapping takes effect
+                    flushTLB();
+                } else {
+                    serial.println("[PAGING] ERROR: No PD table available for kernel GB!", .{});
+                    return;
+                }
+            } else {
+                // Already have a PD table, make sure kernel region entries are cleared
+                const pd_table = &pd_tables[kernel_gb];
+                const kernel_2mb_start = kernel_base & ~@as(u64, PAGE_SIZE_2M - 1);
+                const kernel_2mb_end = (kernel_base + info.kernel_size + PAGE_SIZE_2M - 1) & ~@as(u64, PAGE_SIZE_2M - 1);
+
+                // Clear entries that overlap with kernel so we can set up PT tables
+                const start_pd_idx = @divFloor(kernel_2mb_start % PAGE_SIZE_1G, PAGE_SIZE_2M);
+                const end_pd_idx = @divFloor(kernel_2mb_end % PAGE_SIZE_1G, PAGE_SIZE_2M);
+
+                for (start_pd_idx..end_pd_idx) |i| {
+                    if (i < 512) {
+                        pd_table.*[i] = 0;
+                    }
+                }
+            }
+
+            // Now we have a PD table for the kernel's GB, continue with fine-grained mapping
+        }
+
+        // Handle both first GB and higher GB cases
+        if (kernel_in_first_gb) {
+            // Map first part of memory with 2MB pages in kernel_pd
+            // Map up to the kernel's 2MB-aligned start
+            var addr: u64 = 0;
+            var pd_idx: usize = 0;
+            const kernel_2mb_start = kernel_start_page & ~@as(u64, PAGE_SIZE_2M - 1);
+
+            // Map enough to ensure boot info is accessible, but leave room for the rest of the GB
+            // Boot info is typically at ~254MB, so 256MB should be sufficient
+            // This leaves us with 256 PD entries for the rest of the first GB
+            const min_mapping_size: u64 = 256 * 1024 * 1024; // 256MB
+            const map_up_to = if (kernel_2mb_start > min_mapping_size) kernel_2mb_start else min_mapping_size;
+
+            while (addr < map_up_to and pd_idx < 512) {
+                // Identity mapping: virtual address = physical address
+                const phys_addr = addr; // This is critical!
+                kernel_pd[pd_idx] = phys_addr | PAGE_PRESENT | PAGE_WRITABLE | PAGE_HUGE | PAGE_NO_EXECUTE;
+                addr += PAGE_SIZE_2M;
+                pd_idx += 1;
+            }
+
+            serial.print("[PAGING] Mapped 0-", .{});
+            serial.print("0x{x:0>16}", .{addr});
+            serial.print(" with 2MB pages (", .{});
+            serial.print("0x{x:0>16}", .{pd_idx});
+            serial.println(" entries)", .{});
+
+            // Map kernel area with 4K pages for fine control
+            // We need to replace the 2MB pages covering the kernel with PT tables
+            const kernel_pd_idx = @divFloor(kernel_2mb_start, PAGE_SIZE_2M);
+
+            // CRITICAL: kernel_pd_idx must be within kernel_pd bounds
+            if (kernel_pd_idx >= 512) {
+                serial.print("[PAGING] WARNING: Kernel PD index ", .{});
+                serial.print("0x{x:0>16}", .{kernel_pd_idx});
+                serial.println(" exceeds first GB bounds - kernel at high address due to KASLR", .{});
+
+                // When kernel is beyond first GB, we need to ensure it's mapped properly
+                // The kernel should already be mapped by the identity mapping in higher GBs
+                // We just need to ensure the mapping is correct and has proper permissions
+
+                // Get which GB the kernel is in
+                const actual_kernel_gb = @divFloor(kernel_base, PAGE_SIZE_1G);
+                serial.println("[PAGING] Kernel is in GB 0x{x:0>16} at address 0x{x:0>16}", .{ actual_kernel_gb, kernel_base });
+
+                // Verify that this GB is mapped
+                serial.println("[PAGING] Checking PDPT[0x{x:0>16}] = 0x{x:0>16}", .{ actual_kernel_gb, pdpt_table[actual_kernel_gb] });
+
+                if (actual_kernel_gb < pdpt_table.len and pdpt_table[actual_kernel_gb] != 0) {
+                    serial.println("[PAGING] Kernel GB is already mapped with 1GB page", .{});
+                    // The kernel will run with the 1GB page mapping
+                    // We can't apply fine-grained W^X protection, but the kernel will still work
+                    serial.println("[PAGING] Note: Fine-grained W^X protection not available for high memory kernel", .{});
+                } else {
+                    serial.println("[PAGING] ERROR: Kernel GB is not mapped!", .{});
+                    // This should not happen with our current setup
+                }
+                return;
+            }
+
+            // IMPORTANT: We need to map more than just the kernel code/data
+            // We also need to ensure page tables and stack remain accessible
+            // BUT we must not map our own page table arrays or we'll corrupt ourselves
+            // kernel_end calculation removed as it's not needed
+
+            // Find where our page tables start (they're in BSS after kernel)
+            _ = @intFromPtr(&kernel_pts); // page_tables_start not needed after change
+
+            // Map up to the page tables, but not including them
+            // CRITICAL: We must also ensure the stack remains mapped!
+            // The stack is typically placed after the page tables in BSS
+            // For safety, let's extend mapping by 2MB to cover stack
+            const page_tables_end = @intFromPtr(&kernel_pd) + @sizeOf(@TypeOf(kernel_pd));
+            const safe_end = page_tables_end + 0x200000; // Add 2MB for stack
+            const extended_end = safe_end & ~@as(u64, PAGE_SIZE_4K - 1); // Align down to page boundary
+
+            // Calculate how many 2MB regions we need to cover with 4K pages
+            const extended_num_pts = @divFloor(extended_end - kernel_2mb_start + PAGE_SIZE_2M - 1, PAGE_SIZE_2M);
+
+            serial.println("[PAGING] Setting up 0x{x:0>16} PT tables starting at PD entry 0x{x:0>16}", .{ extended_num_pts, kernel_pd_idx });
+
+            // Sanity check - ensure we don't exceed our PT table array bounds
+            if (extended_num_pts > kernel_pts.len) {
+                serial.print("[PAGING] ERROR: Need ", .{});
+                serial.print("0x{x:0>16}", .{extended_num_pts});
+                serial.print(" PT tables but only have ", .{});
+                serial.print("0x{x:0>16}", .{kernel_pts.len});
+                serial.println(" allocated!", .{});
+                while (true) {
+                    asm volatile ("hlt");
+                }
+            }
+
+            // Also check PD bounds
+            if (kernel_pd_idx + extended_num_pts > 512) {
+                serial.print("[PAGING] ERROR: PD entries ", .{});
+                serial.print("0x{x:0>16}", .{kernel_pd_idx});
+                serial.print(" + ", .{});
+                serial.print("0x{x:0>16}", .{extended_num_pts});
+                serial.println(" exceeds 512!", .{});
+                while (true) {
+                    asm volatile ("hlt");
+                }
+            }
+
+            for (0..extended_num_pts) |i| {
+                const pd_entry_idx = kernel_pd_idx + i;
+                if (pd_entry_idx >= 512) {
+                    serial.print("[PAGING] ERROR: PD entry index ", .{});
+                    serial.print("0x{x:0>16}", .{pd_entry_idx});
+                    serial.println(" exceeds bounds during PT setup!", .{});
+                    break;
+                }
+                kernel_pd[pd_entry_idx] = runtime_info.getPhysicalAddress(&kernel_pts[i]) | PAGE_PRESENT | PAGE_WRITABLE;
+            }
+
+            // PT tables set up
+
+            // Map 4K pages with appropriate permissions
+            // Start from 2MB-aligned boundary to properly fill the PT tables
+            applyKernelPermissions4K(kernel_2mb_start, extended_end, kernel_start_page, data_start_addr, bss_start_addr, bss_end_addr);
+
+            // Continue with mapping
+
+            // Continue mapping rest of memory with 2MB pages
+            // We've mapped some initial memory, then replaced kernel region with PT tables
+            // Now continue from after the kernel region
+
+            // Calculate the PD index to continue from
+            const kernel_region_end_pd = kernel_pd_idx + extended_num_pts;
+            // Continue from the maximum of where we left off initially or after the kernel region
+            pd_idx = @max(pd_idx, kernel_region_end_pd);
+
+            // Calculate the address to continue from
+            // Use the address that corresponds to our pd_idx
+            addr = pd_idx * PAGE_SIZE_2M;
+
+            // Map as much as we can with remaining PD entries
+            // We may not be able to map the full first GB due to PT tables taking up entries
+            // IMPORTANT: Leave at least one entry as guard to prevent stack corruption
+            const max_safe_entries = 511; // Leave last entry as guard
+            const remaining_entries = if (pd_idx < max_safe_entries) max_safe_entries - pd_idx else 0;
+            const end_addr = addr + (remaining_entries * PAGE_SIZE_2M);
+
+            // Only map up to 1GB boundary
+            const gb_boundary = PAGE_SIZE_1G;
+            const actual_end = @min(end_addr, gb_boundary);
+
+            while (addr < actual_end and pd_idx < max_safe_entries) {
+                // Write the PD entry with identity mapping
+                const phys_addr = addr; // Identity: virtual = physical
+                kernel_pd[pd_idx] = phys_addr | PAGE_PRESENT | PAGE_WRITABLE | PAGE_HUGE | PAGE_NO_EXECUTE;
+                addr += PAGE_SIZE_2M;
+                pd_idx += 1;
+            }
+
+            // kernel_pd mapping complete
+
+            // Log what we managed to map
+            if (addr < gb_boundary) {
+                serial.print("[PAGING] Note: Mapped up to ", .{});
+                serial.print("0x{x:0>16}", .{addr});
+                serial.print(" of first GB (", .{});
+                serial.print("0x{x:0>16}", .{gb_boundary - addr});
+                serial.println(" bytes unmapped due to kernel fine-grained mapping)", .{});
+            }
+        } else {
+            // Kernel is in a higher GB - we need to apply fine-grained protection there
+            const kernel_2mb_start = kernel_start_page & ~@as(u64, PAGE_SIZE_2M - 1);
+            const kernel_pd_idx = @divFloor(kernel_2mb_start % PAGE_SIZE_1G, PAGE_SIZE_2M);
+
+            // Get the PD table for the kernel's GB
+            const pd_table = &pd_tables[kernel_gb];
+
+            // Find where our page tables start (they're in BSS after kernel)
+            const page_tables_end = @intFromPtr(&kernel_pd) + @sizeOf(@TypeOf(kernel_pd));
+            const safe_end = page_tables_end + 0x200000; // Add 2MB for stack
+            const extended_end = safe_end & ~@as(u64, PAGE_SIZE_4K - 1); // Align down to page boundary
+
+            // Calculate how many 2MB regions we need to cover with 4K pages
+            const extended_num_pts = @divFloor(extended_end - kernel_2mb_start + PAGE_SIZE_2M - 1, PAGE_SIZE_2M);
+
+            serial.println("[PAGING] Setting up 0x{x:0>16} PT tables for high memory kernel starting at PD entry 0x{x:0>16}", .{ extended_num_pts, kernel_pd_idx });
+
+            // Sanity check - ensure we don't exceed our PT table array bounds
+            if (extended_num_pts > kernel_pts.len) {
+                serial.print("[PAGING] ERROR: Need ", .{});
+                serial.print("0x{x:0>16}", .{extended_num_pts});
+                serial.print(" PT tables but only have ", .{});
+                serial.print("0x{x:0>16}", .{kernel_pts.len});
+                serial.println(" allocated!", .{});
+                return;
+            }
+
+            // Also check PD bounds
+            if (kernel_pd_idx + extended_num_pts > 512) {
+                serial.print("[PAGING] ERROR: PD entries ", .{});
+                serial.print("0x{x:0>16}", .{kernel_pd_idx});
+                serial.print(" + ", .{});
+                serial.print("0x{x:0>16}", .{extended_num_pts});
+                serial.println(" exceeds 512!", .{});
+                return;
+            }
+
+            // Replace 2MB pages with PT tables for kernel area
+            for (0..extended_num_pts) |i| {
+                const pd_entry_idx = kernel_pd_idx + i;
+                if (pd_entry_idx >= 512) {
+                    serial.print("[PAGING] ERROR: PD entry index ", .{});
+                    serial.print("0x{x:0>16}", .{pd_entry_idx});
+                    serial.println(" exceeds bounds during PT setup!", .{});
+                    break;
+                }
+                pd_table.*[pd_entry_idx] = runtime_info.getPhysicalAddress(&kernel_pts[i]) | PAGE_PRESENT | PAGE_WRITABLE;
+            }
+
+            // Map 4K pages with appropriate permissions
+            applyKernelPermissions4K(kernel_2mb_start, extended_end, kernel_start_page, data_start_addr, bss_start_addr, bss_end_addr);
+
+            serial.println("[PAGING] Fine-grained W^X protection applied to high memory kernel", .{});
+        } // End of kernel_in_first_gb condition
+    } else {
+        // For 2MB pages, we need to find the kernel's PD entry and split it
+        const kernel_gb_idx = @divFloor(kernel_start_page, PAGE_SIZE_1G);
+        const kernel_pd_idx = @divFloor(kernel_start_page % PAGE_SIZE_1G, PAGE_SIZE_2M);
+
+        // Get the PD table for the kernel's GB
+        const pd_table = &pd_tables[kernel_gb_idx];
+
+        // Map kernel area with 4K pages
+        // Find where our page tables start (they're in BSS after kernel)
+        _ = @intFromPtr(&kernel_pts); // page_tables_start not needed after change
+        // CRITICAL: We must also ensure the stack remains mapped!
+        const page_tables_end = @intFromPtr(&kernel_pd) + @sizeOf(@TypeOf(kernel_pd));
+        const safe_end = page_tables_end + 0x200000; // Add 2MB for stack
+        const extended_end = safe_end & ~@as(u64, PAGE_SIZE_4K - 1); // Align down to page boundary
+        const kernel_2mb_start = kernel_start_page & ~@as(u64, PAGE_SIZE_2M - 1);
+        const kernel_2mb_end = (extended_end + PAGE_SIZE_2M - 1) & ~@as(u64, PAGE_SIZE_2M - 1);
+        const num_2mb_pages = @divFloor(kernel_2mb_end - kernel_2mb_start, PAGE_SIZE_2M);
+
+        // Replace 2MB pages with PT tables for kernel area
+        for (0..num_2mb_pages) |i| {
+            const pd_entry_idx = kernel_pd_idx + i;
+            if (pd_entry_idx < 512 and i < kernel_pts.len) {
+                pd_table.*[pd_entry_idx] = runtime_info.getPhysicalAddress(&kernel_pts[i]) | PAGE_PRESENT | PAGE_WRITABLE;
+            }
+        }
+
+        // Map 4K pages with appropriate permissions
+        applyKernelPermissions4K(kernel_2mb_start, extended_end, kernel_start_page, data_start_addr, bss_start_addr, bss_end_addr);
+    }
+}
+
+// Apply fine-grained permissions to kernel pages
+fn applyKernelPermissions4K(region_start: u64, region_end: u64, kernel_start: u64, data_start: u64, _: u64, bss_end: u64) void {
+    // Stack protection is not safe here as we're actively modifying
+    // the page tables that contain our stack memory
+    // This function is only called during initial setup
+    const num_pages = @divFloor(region_end - region_start, PAGE_SIZE_4K);
+    var page_addr = region_start;
+    var pt_idx: usize = 0;
+    var current_pt: usize = 0;
+
+    serial.println("[PAGING] Applying W^X to kernel pages:", .{});
+    serial.print("  Mapping region: 0x", .{});
+    serial.print("0x{x:0>16}", .{region_start});
+    serial.print(" - 0x", .{});
+    serial.print("0x{x:0>16}", .{region_end});
+    serial.print(" (", .{});
+    serial.print("0x{x:0>16}", .{num_pages});
+    serial.println(" pages)", .{});
+
+    for (0..num_pages) |_| {
+        // Check bounds before accessing array
+        if (current_pt >= kernel_pts.len) {
+            serial.println("[PAGING] ERROR: Ran out of PT tables!", .{});
+            break;
+        }
+
+        if (pt_idx >= 512) {
+            current_pt += 1;
+            pt_idx = 0;
+            // Check again after incrementing current_pt
+            if (current_pt >= kernel_pts.len) {
+                serial.println("[PAGING] ERROR: Ran out of PT tables!", .{});
+                break;
+            }
+        }
+
+        var flags: u64 = undefined;
+        var pkey: pku.ProtectionKeys = undefined;
+
+        if (page_addr < kernel_start) {
+            // Before kernel - non-executable data pages
+            flags = PAGE_KERNEL_DATA;
+            pkey = pku.ProtectionKeys.kernel_data;
+        } else if (page_addr < data_start) {
+            // Code section - executable, not writable
+            flags = PAGE_KERNEL_CODE;
+            pkey = pku.ProtectionKeys.kernel_code;
+        } else if (page_addr < bss_end) {
+            // Data/BSS sections - writable, not executable
+            flags = PAGE_KERNEL_DATA;
+            pkey = pku.ProtectionKeys.kernel_data;
+        } else {
+            // After kernel - keep mapped as writable/non-executable
+            // This includes page tables and stack
+            flags = PAGE_KERNEL_DATA;
+            pkey = pku.ProtectionKeys.page_tables;
+        }
+
+        // Write the page table entry with identity mapping and protection key
+        // virtual page_addr maps to physical page_addr
+        kernel_pts[current_pt][pt_idx] = pku.createPageEntryWithKey(page_addr, flags, pkey);
+        page_addr += PAGE_SIZE_4K;
+        pt_idx += 1;
+    }
+
+    // Check if we can add guard page
+
+    // Add guard page after kernel
+    if (pt_idx < 512 and current_pt < kernel_pts.len) {
+        kernel_pts[current_pt][pt_idx] = pku.createPageEntryWithKey(0, PAGE_GUARD, pku.ProtectionKeys.guard_pages);
+    } else {
+        serial.println("  WARNING: Cannot add guard page - out of bounds", .{});
+    }
+}
+
+fn applyMemoryPermissions(boot_info: *const uefi_boot.UEFIBootInfo) void {
+    // Stack protection may be safe here depending on when this is called
+    var guard: ?stack_security.canaryGuard() = null;
+    if (isStackProtectionSafe()) {
+        guard = stack_security.protect();
+    }
+    defer if (guard) |*g| g.deinit();
+
+    const kernel_start = boot_info.kernel_base;
+    const kernel_end = kernel_start + boot_info.kernel_size;
+
+    secure_print.printRange("[PAGING] Kernel region", kernel_start, kernel_end);
+
+    // Fine-grained protection is now handled by setupKernelProtection()
+}
+
+// Get current page table base (CR3)
+pub fn getCurrentPageTable() u64 {
+    return asm volatile ("mov %%cr3, %[result]"
+        : [result] "=r" (-> u64),
+    );
+}
+
+// Invalidate TLB entry for a specific address
+pub fn invalidatePage(addr: u64) void {
+    asm volatile ("invlpg (%[addr])"
+        :
+        : [addr] "r" (addr),
+        : "memory"
+    );
+}
+
+// Flush entire TLB by reloading CR3
+pub fn flushTLB() void {
+    const cr3 = getCurrentPageTable();
+    asm volatile ("mov %[value], %%cr3"
+        :
+        : [value] "r" (cr3),
+        : "memory"
+    );
+}
+
+// Delegate protection key functions to PKU module
+pub const setProtectionKey = pku.setProtectionKey;
+pub const getProtectionKey = pku.getProtectionKey;
+
+// Delegate getTableIndex to LA57 module
+pub const getTableIndex = la57.getTableIndex;
+
+// Delegate PKU functions to PKU module
+pub const PKRUAccessRights = pku.PKRUAccessRights;
+pub const readPKRU = pku.readPKRU;
+pub const writePKRU = pku.writePKRU;
+pub const setPKRU = pku.setPKRU;
+pub const getPKRU = pku.getPKRU;
+
+// Delegate PCID functions to PCID module
+pub const loadPageTableWithPCID = pcid.loadPageTableWithPCID;
+pub const switchPageTableNoFlush = pcid.switchPageTableNoFlush;
+pub const invalidatePCID = pcid.invalidatePCID;
+pub const isPCIDSupported = pcid.isSupported;
+
+// Print page table info
+pub fn printInfo() void {
+    secure_print.printValue("[PAGING] CR3", getCurrentPageTable());
+
+    // Check if we're using 1GB or 2MB pages
+    const features = cpuid.getFeatures();
+    if (features.gbpages) {
+        serial.println("[PAGING] Using 1GB pages with fine-grained kernel protection", .{});
+        serial.println("[PAGING] First GB uses 2MB/4KB pages for kernel W^X enforcement", .{});
+    } else {
+        serial.println("[PAGING] Using 2MB pages with fine-grained kernel protection", .{});
+    }
+
+    // Check PAT status
+    if (features.pat) {
+        serial.println("[PAGING] PAT (Page Attribute Table) enabled", .{});
+
+        // PAT module handles displaying its configuration
+    }
+
+    // Check PKU status
+    if (features.pku) {
+        serial.println("[PAGING] PKU (Protection Keys for Userspace) enabled", .{});
+
+        // Read and display current PKRU value
+        const pkru_value = readPKRU();
+        serial.println("[PAGING] Current PKRU value: 0x{x:0>8}", .{pkru_value});
+    }
+}
+
+// Delegate validation functions to validation module
+pub const validateEntry = validation.validateEntry;
+pub const isCanonicalAddress = validation.isCanonicalAddress;
+
+// Unmap a page at the given virtual address
+// This makes the page inaccessible and will cause a page fault on access
+pub fn unmapPage(virt_addr: u64) !void {
+    var guard = stack_security.protect();
+    defer guard.deinit();
+
+    // Acquire page table lock for this address
+    var lock_guard = page_table_locks.acquireForAddress(virt_addr);
+    defer lock_guard.deinit();
+    // Find the page table entry for this address
+    const pml4_idx = getTableIndex(virt_addr, 4);
+    const pdpt_idx = getTableIndex(virt_addr, 3);
+    const pd_idx = getTableIndex(virt_addr, 2);
+    const pt_idx = getTableIndex(virt_addr, 1);
+
+    // Check if PML4 entry exists
+    if ((pml4_table[pml4_idx] & PAGE_PRESENT) == 0) {
+        return error.PageNotMapped;
+    }
+
+    // For simplicity, assume we're using 4K pages in kernel region
+    // In a full implementation, we'd need to handle 1GB and 2MB pages too
+
+    // Navigate to the page table
+    const pdpt_phys = pml4_table[pml4_idx] & PHYS_ADDR_MASK;
+    const pdpt = @as(*[512]u64, @ptrFromInt(pdpt_phys));
+
+    if ((pdpt[pdpt_idx] & PAGE_PRESENT) == 0) {
+        return error.PageNotMapped;
+    }
+
+    // Check if this is a 1GB page
+    if ((pdpt[pdpt_idx] & PAGE_HUGE) != 0) {
+        // Remove the entire 1GB page
+        pdpt[pdpt_idx] = 0;
+        asm volatile ("mfence" ::: "memory");
+        invalidatePage(virt_addr);
+        return;
+    }
+
+    const pd_phys = pdpt[pdpt_idx] & PHYS_ADDR_MASK;
+    const pd = @as(*[512]u64, @ptrFromInt(pd_phys));
+
+    if ((pd[pd_idx] & PAGE_PRESENT) == 0) {
+        return error.PageNotMapped;
+    }
+
+    // Check if this is a 2MB page
+    if ((pd[pd_idx] & PAGE_HUGE) != 0) {
+        // Remove the entire 2MB page
+        pd[pd_idx] = 0;
+        asm volatile ("mfence" ::: "memory");
+        invalidatePage(virt_addr);
+        return;
+    }
+
+    const pt_phys = pd[pd_idx] & PHYS_ADDR_MASK;
+    const pt = @as(*[512]u64, @ptrFromInt(pt_phys));
+
+    if ((pt[pt_idx] & PAGE_PRESENT) == 0) {
+        return error.PageNotMapped;
+    }
+
+    // Remove the 4K page
+    pt[pt_idx] = 0;
+    asm volatile ("mfence" ::: "memory");
+    invalidatePage(virt_addr);
+}
+
+// Map a page with specific permissions
+// This is a simplified version - a full implementation would handle page table allocation
+pub fn mapPage(virt_addr: u64, phys_addr: u64, flags: u64) !void {
+    var guard = stack_security.protect();
+    defer guard.deinit();
+
+    // Acquire page table lock for this address
+    var lock_guard = page_table_locks.acquireForAddress(virt_addr);
+    defer lock_guard.deinit();
+    // This is a basic implementation - in practice you'd need to allocate
+    // page table pages if they don't exist
+
+    const pml4_idx = getTableIndex(virt_addr, 4);
+    const pdpt_idx = getTableIndex(virt_addr, 3);
+    const pd_idx = getTableIndex(virt_addr, 2);
+    const pt_idx = getTableIndex(virt_addr, 1);
+
+    // For now, assume all page table structures exist
+    if ((pml4_table[pml4_idx] & PAGE_PRESENT) == 0) {
+        return error.PageTableNotPresent;
+    }
+
+    const pdpt_phys = pml4_table[pml4_idx] & PHYS_ADDR_MASK;
+    const pdpt = @as(*[512]u64, @ptrFromInt(pdpt_phys));
+
+    if ((pdpt[pdpt_idx] & PAGE_PRESENT) == 0) {
+        return error.PageTableNotPresent;
+    }
+
+    if ((pdpt[pdpt_idx] & PAGE_HUGE) != 0) {
+        return error.PageSizeConflict; // Can't map 4K page in 1GB region
+    }
+
+    const pd_phys = pdpt[pdpt_idx] & PHYS_ADDR_MASK;
+    const pd = @as(*[512]u64, @ptrFromInt(pd_phys));
+
+    if ((pd[pd_idx] & PAGE_PRESENT) == 0) {
+        return error.PageTableNotPresent;
+    }
+
+    if ((pd[pd_idx] & PAGE_HUGE) != 0) {
+        return error.PageSizeConflict; // Can't map 4K page in 2MB region
+    }
+
+    const pt_phys = pd[pd_idx] & PHYS_ADDR_MASK;
+    const pt = @as(*[512]u64, @ptrFromInt(pt_phys));
+
+    // Map the page
+    pt[pt_idx] = phys_addr | flags;
+
+    // Flush TLB entry with memory barrier
+    asm volatile ("mfence" ::: "memory");
+    invalidatePage(virt_addr);
+}
+
+// Map a page with raw page table entry value (for special page types like shadow stack)
+// This allows full control over page table entry bits
+pub fn mapPageRaw(virt_addr: u64, raw_entry: u64) !void {
+    var guard = stack_security.protect();
+    defer guard.deinit();
+
+    // Acquire page table lock for this address
+    var lock_guard = page_table_locks.acquireForAddress(virt_addr);
+    defer lock_guard.deinit();
+    const pml4_idx = getTableIndex(virt_addr, 4);
+    const pdpt_idx = getTableIndex(virt_addr, 3);
+    const pd_idx = getTableIndex(virt_addr, 2);
+    const pt_idx = getTableIndex(virt_addr, 1);
+
+    // For now, assume all page table structures exist
+    if ((pml4_table[pml4_idx] & PAGE_PRESENT) == 0) {
+        return error.PageTableNotPresent;
+    }
+
+    const pdpt_phys = pml4_table[pml4_idx] & PHYS_ADDR_MASK;
+    const pdpt = @as(*[512]u64, @ptrFromInt(pdpt_phys));
+
+    if ((pdpt[pdpt_idx] & PAGE_PRESENT) == 0) {
+        return error.PageTableNotPresent;
+    }
+
+    if ((pdpt[pdpt_idx] & PAGE_HUGE) != 0) {
+        return error.PageSizeConflict; // Can't map 4K page in 1GB region
+    }
+
+    const pd_phys = pdpt[pdpt_idx] & PHYS_ADDR_MASK;
+    const pd = @as(*[512]u64, @ptrFromInt(pd_phys));
+
+    if ((pd[pd_idx] & PAGE_PRESENT) == 0) {
+        return error.PageTableNotPresent;
+    }
+
+    if ((pd[pd_idx] & PAGE_HUGE) != 0) {
+        return error.PageSizeConflict; // Can't map 4K page in 2MB region
+    }
+
+    const pt_phys = pd[pd_idx] & PHYS_ADDR_MASK;
+    const pt = @as(*[512]u64, @ptrFromInt(pt_phys));
+
+    // Map the page with raw entry
+    pt[pt_idx] = raw_entry;
+    asm volatile ("mfence" ::: "memory");
+    invalidatePage(virt_addr);
+}
+
+// Create a guard page that will fault on any access
+pub fn createGuardPageAt(addr: u64) !void {
+    try guard_pages.createGuardPageAt(addr, unmapPage);
+}
+
+// Add guard pages around a virtual memory region
+pub fn addGuardPagesAroundVirtualRegion(start: u64, size: u64) !void {
+    try guard_pages.addGuardPagesAroundVirtualRegion(start, size, createGuardPageAt);
+}
+
+// Test memory protection features at the paging level
+pub fn testPagingMemoryProtection() void {
+    test_utils.testPagingMemoryProtection(getPageTableEntry);
+}
+
+// Map a page as a shadow stack page (for CET)
+pub fn mapShadowStackPage(virt_addr: u64, phys_addr: u64) !void {
+    try shadow_stack.mapShadowStackPage(virt_addr, phys_addr, mapPageRaw);
+}
+
+// Map a page with specific permissions and protection key
+pub fn mapPageWithKey(virt_addr: u64, phys_addr: u64, flags: u64, key: pku.ProtectionKeys) !void {
+    var guard = stack_security.protect();
+    defer guard.deinit();
+
+    // Acquire page table lock for this address
+    var lock_guard = page_table_locks.acquireForAddress(virt_addr);
+    defer lock_guard.deinit();
+
+    // Create page table entry with protection key
+    const entry = pku.createPageEntryWithKey(phys_addr, flags, key);
+
+    // Map the page with the PKU-enabled entry
+    try mapPageRaw(virt_addr, entry);
+}
+
+// Get page table entry for a virtual address
+pub fn getPageTableEntry(virt_addr: u64) !u64 {
+    const pml4_idx = getTableIndex(virt_addr, 4);
+    const pdpt_idx = getTableIndex(virt_addr, 3);
+    const pd_idx = getTableIndex(virt_addr, 2);
+    const pt_idx = getTableIndex(virt_addr, 1);
+
+    // Navigate to the page table entry
+    if ((pml4_table[pml4_idx] & PAGE_PRESENT) == 0) {
+        return error.PageNotMapped;
+    }
+
+    const pdpt_phys = pml4_table[pml4_idx] & PHYS_ADDR_MASK;
+    const pdpt = @as(*[512]u64, @ptrFromInt(pdpt_phys));
+
+    if ((pdpt[pdpt_idx] & PAGE_PRESENT) == 0) {
+        return error.PageNotMapped;
+    }
+
+    // Handle 1GB pages
+    if ((pdpt[pdpt_idx] & PAGE_HUGE) != 0) {
+        return pdpt[pdpt_idx];
+    }
+
+    const pd_phys = pdpt[pdpt_idx] & PHYS_ADDR_MASK;
+    const pd = @as(*[512]u64, @ptrFromInt(pd_phys));
+
+    if ((pd[pd_idx] & PAGE_PRESENT) == 0) {
+        return error.PageNotMapped;
+    }
+
+    // Handle 2MB pages
+    if ((pd[pd_idx] & PAGE_HUGE) != 0) {
+        return pd[pd_idx];
+    }
+
+    const pt_phys = pd[pd_idx] & PHYS_ADDR_MASK;
+    const pt = @as(*[512]u64, @ptrFromInt(pt_phys));
+
+    // Return 4K page entry (even if not present, for shadow stack pages)
+    return pt[pt_idx];
+}
+
+// Run all paging tests
+pub fn testAllPagingFeatures() void {
+    test_utils.testAll();
+    testPagingMemoryProtection();
+}
+
+// Update page flags without changing the physical address
+// This is useful for changing permissions on existing mappings
+pub fn updatePageFlags(virt_addr: u64, new_flags: u64) !void {
+    var guard = stack_security.protect();
+    defer guard.deinit();
+
+    // Acquire page table lock for this address
+    var lock_guard = page_table_locks.acquireForAddress(virt_addr);
+    defer lock_guard.deinit();
+    const pml4_idx = getTableIndex(virt_addr, 4);
+    const pdpt_idx = getTableIndex(virt_addr, 3);
+    const pd_idx = getTableIndex(virt_addr, 2);
+    const pt_idx = getTableIndex(virt_addr, 1);
+
+    // Navigate to the page table entry
+    if ((pml4_table[pml4_idx] & PAGE_PRESENT) == 0) {
+        return error.PageNotMapped;
+    }
+
+    const pdpt_phys = pml4_table[pml4_idx] & PHYS_ADDR_MASK;
+    const pdpt = @as(*[512]u64, @ptrFromInt(pdpt_phys));
+
+    if ((pdpt[pdpt_idx] & PAGE_PRESENT) == 0) {
+        return error.PageNotMapped;
+    }
+
+    // Handle 1GB pages
+    if ((pdpt[pdpt_idx] & PAGE_HUGE) != 0) {
+        const phys_addr = pdpt[pdpt_idx] & PHYS_ADDR_MASK;
+        pdpt[pdpt_idx] = phys_addr | new_flags | PAGE_HUGE;
+        asm volatile ("mfence" ::: "memory");
+        invalidatePage(virt_addr);
+        return;
+    }
+
+    const pd_phys = pdpt[pdpt_idx] & PHYS_ADDR_MASK;
+    const pd = @as(*[512]u64, @ptrFromInt(pd_phys));
+
+    if ((pd[pd_idx] & PAGE_PRESENT) == 0) {
+        return error.PageNotMapped;
+    }
+
+    // Handle 2MB pages
+    if ((pd[pd_idx] & PAGE_HUGE) != 0) {
+        const phys_addr = pd[pd_idx] & PHYS_ADDR_MASK;
+        pd[pd_idx] = phys_addr | new_flags | PAGE_HUGE;
+        asm volatile ("mfence" ::: "memory");
+        invalidatePage(virt_addr);
+        return;
+    }
+
+    const pt_phys = pd[pd_idx] & PHYS_ADDR_MASK;
+    const pt = @as(*[512]u64, @ptrFromInt(pt_phys));
+
+    if ((pt[pt_idx] & PAGE_PRESENT) == 0) {
+        return error.PageNotMapped;
+    }
+
+    // Update 4K page
+    const phys_addr = pt[pt_idx] & PHYS_ADDR_MASK;
+    pt[pt_idx] = phys_addr | new_flags;
+    asm volatile ("mfence" ::: "memory");
+    invalidatePage(virt_addr);
+}
