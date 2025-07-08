@@ -22,43 +22,49 @@ ap_rm_entry:
     
     cli
     
+    # Add a delay loop to ensure BSP completes APIC write
+    mov $0x10000, %cx
+1:  dec %cx
+    jnz 1b
+    
     # Load data segment FIRST before any memory accesses
     xor %ax, %ax
     mov %ax, %ds
     mov %ax, %es
     
-    # Now it's safe to write debug markers
-    # Write 0xDEAD to address 0x9FE0 using direct addressing
-    mov $0xDEAD, %ax
-    mov %ax, 0x9FE0
+    # IMPORTANT: Comment out debug writes until we verify memory mapping
+    # These writes to 0x9FE0/0x9FF0 may cause bus conflicts
+    # TODO: Re-enable after verifying these addresses are safe
+    #
+    # mov $0xDEAD, %ax
+    # mov %ax, 0x9FE0
+    # mov $0xBEEF, %ax
+    # mov %ax, 0x9FF0
     
-    # Write another marker to show we got past segment setup
-    # Write 0xBEEF to address 0x9FF0 to indicate real mode entry
-    mov $0xBEEF, %ax
-    mov %ax, 0x9FF0
-    
-    # Write debug info: RealMode16 stage (1)
-    # Debug structure at 0x9000: magic(4), cpu_id(4), stage(1), error(1), pad(6), value(8)
-    movl $0x12345678, 0x9000       # Magic
-    movl (ap_cpu_id - ap_trampoline_start + 0x5000), %eax
-    movl %eax, 0x9004              # CPU ID
-    movb $1, 0x9008                # Stage = RealMode16
-    movb $0, 0x9009                # Error = 0
+    # IMPORTANT: Skip debug writes to 0x9000 for now
+    # These may conflict with MMIO or unmapped memory
+    # TODO: Verify 0x9000 is in conventional memory before using
+    #
+    # movl $0x12345678, 0x9000       # Magic
+    # movl (ap_cpu_id - ap_trampoline_start + 0x5000), %eax
+    # movl %eax, 0x9004              # CPU ID
+    # movb $1, 0x9008                # Stage = RealMode16
+    # movb $0, 0x9009                # Error = 0
     
     # Load GDT pointer using absolute addressing
     # GDT descriptor will be placed at 0x5000 + ap_gdtr offset
     lgdt (ap_gdtr - ap_trampoline_start + 0x5000)
     
-    # Write marker to show we passed lgdt
-    movw $0x1111, 0x9FFC
+    # Skip debug marker write
+    # movw $0x1111, 0x9FFC
     
     # Enable protected mode
     mov %cr0, %eax
     or $1, %eax
     mov %eax, %cr0
     
-    # Write marker to show we enabled protected mode
-    movw $0x2222, 0x9FFA
+    # Skip debug marker write
+    # movw $0x2222, 0x9FFA
     
     # Far jump to 32-bit protected mode
     # CS = 0x08 (code segment), EIP = 32-bit entry relative to 0x5000
@@ -77,8 +83,8 @@ ap_exception_handler:
 .code32
 .align 16
 ap_pm_entry:
-    # Write marker to show we reached 32-bit mode
-    movl $0x3333, 0x9FF8
+    # Skip debug marker write until memory verified
+    # movl $0x3333, 0x9FF8
     
     # Setup segments
     mov $0x10, %ax      # Data segment selector
@@ -92,12 +98,12 @@ ap_pm_entry:
     # This prevents exceptions from causing a system hang
     lidt (ap_idtr - ap_trampoline_start + 0x5000)
     
-    # Write debug info: ProtectedMode32 stage (2)
-    movl $0x12345678, 0x9000       # Magic
-    movl (ap_cpu_id - ap_trampoline_start + 0x5000), %eax
-    movl %eax, 0x9004              # CPU ID
-    movb $2, 0x9008                # Stage = ProtectedMode32
-    movb $0, 0x9009                # Error = 0
+    # Skip debug writes until memory mapping verified
+    # movl $0x12345678, 0x9000       # Magic
+    # movl (ap_cpu_id - ap_trampoline_start + 0x5000), %eax
+    # movl %eax, 0x9004              # CPU ID
+    # movb $2, 0x9008                # Stage = ProtectedMode32
+    # movb $0, 0x9009                # Error = 0
     
     # Load page table base into CR3
     # The BSP will write the PML4 address to ap_pml4_addr
