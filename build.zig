@@ -196,7 +196,7 @@ pub fn build(b: *std.Build) void {
 
     // Test step (hash generation happens automatically via dependency chain)
     const test_cmd = b.addSystemCommand(&[_][]const u8{
-        "bash", "scripts/test.sh",
+        "bash", "scripts/test.sh", "2", "1024",
     });
     test_cmd.step.dependOn(&create_disk_cmd.step);
 
@@ -205,7 +205,7 @@ pub fn build(b: *std.Build) void {
 
     // Run step (GUI mode) - hash generation happens automatically via dependency chain
     const run_cmd = b.addSystemCommand(&[_][]const u8{
-        "bash", "scripts/run.sh",
+        "bash", "scripts/run.sh", "2", "1024",
     });
     run_cmd.step.dependOn(&create_disk_cmd.step);
 

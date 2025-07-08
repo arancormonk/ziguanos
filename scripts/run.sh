@@ -10,6 +10,10 @@ BUILD_DIR="$PROJECT_ROOT/zig-out"
 UEFI_IMAGE="$BUILD_DIR/ziguanos-uefi.img"
 SERIAL_LOG="$PROJECT_ROOT/serial.log"
 
+# Parse command line arguments
+SMP_CORES="${1:-2}"
+MEMORY_MB="${2:-1024}"
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -17,6 +21,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 echo -e "${GREEN}Running Ziguanos with UEFI (GUI mode)...${NC}"
+echo -e "${GREEN}Configuration: ${SMP_CORES} CPUs, ${MEMORY_MB}MB RAM${NC}"
 
 # Check if UEFI image exists
 if [ ! -f "$UEFI_IMAGE" ]; then
@@ -55,8 +60,8 @@ rm -f "$SERIAL_LOG"
 QEMU_ARGS=(
     -machine q35
     -cpu host,+invtsc
-    -smp 4
-    -m 8192M
+    -smp "$SMP_CORES"
+    -m "${MEMORY_MB}M"
     -no-reboot
     -no-shutdown
     -serial file:"$SERIAL_LOG"

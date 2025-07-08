@@ -11,6 +11,10 @@ UEFI_IMAGE="$BUILD_DIR/ziguanos-uefi.img"
 SERIAL_LOG="$PROJECT_ROOT/serial.log"
 QEMU_LOG="$PROJECT_ROOT/qemu.log"
 
+# Parse command line arguments
+SMP_CORES="${1:-2}"
+MEMORY_MB="${2:-1024}"
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -18,6 +22,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 echo -e "${GREEN}Testing Ziguanos with UEFI...${NC}"
+echo -e "${GREEN}Configuration: ${SMP_CORES} CPUs, ${MEMORY_MB}MB RAM${NC}"
 
 # Check if UEFI image exists
 if [ ! -f "$UEFI_IMAGE" ]; then
@@ -56,7 +61,8 @@ rm -f "$SERIAL_LOG" "$QEMU_LOG"
 QEMU_ARGS=(
     -machine q35
     -cpu max
-    -m 256M
+    -smp "$SMP_CORES"
+    -m "${MEMORY_MB}M"
     -no-reboot
     -no-shutdown
     -serial file:"$SERIAL_LOG"
@@ -124,7 +130,7 @@ echo -e "${GREEN}=== Test Summary ===${NC}"
 # Check if kernel was loaded
 if [ -f "$SERIAL_LOG" ] && grep -q "Kernel loaded successfully" "$SERIAL_LOG"; then
     echo -e "${GREEN}✓ UEFI bootloader loaded kernel successfully${NC}"
-    
+
     # Check if kernel started
     if grep -q "\\[KERNEL\\]" "$SERIAL_LOG"; then
         echo -e "${GREEN}✓ Kernel started execution${NC}"
@@ -135,13 +141,13 @@ if [ -f "$SERIAL_LOG" ] && grep -q "Kernel loaded successfully" "$SERIAL_LOG"; t
     fi
 else
     echo -e "${RED}✗ Failed to load kernel${NC}"
-    
+
     # Show QEMU log for debugging
     if [ -f "$QEMU_LOG" ] && [ -s "$QEMU_LOG" ]; then
         echo ""
         echo -e "${YELLOW}=== QEMU Debug Log (last 50 lines) ===${NC}"
         tail -50 "$QEMU_LOG"
     fi
-    
+
     exit 1
 fi

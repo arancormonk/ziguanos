@@ -124,6 +124,7 @@ fn kernelMainPhase2() noreturn {
     };
 
     // Initialize hardware
+    hardware_init.setBootInfo(boot_info);
     hardware_init.init();
 
     // Test NX bit (uncomment to test - will cause page fault if NX is working)

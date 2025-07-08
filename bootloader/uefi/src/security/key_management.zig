@@ -93,6 +93,66 @@ pub fn deriveKey(
     var platform_data: [64]u8 = undefined;
     var platform_data_size: usize = 0;
 
+    // Initialize with hardware entropy to ensure minimum entropy
+    // This provides a baseline even if platform data collection fails
+    var entropy_baseline: [32]u8 = undefined;
+    var entropy_success = true;
+
+    // Try to fill entropy baseline with hardware RNG mixed with other sources
+    var entropy_idx: usize = 0;
+
+    // First 8 bytes: hardware RNG
+    while (entropy_idx < 8) : (entropy_idx += 1) {
+        if (rng.getRandom(u8)) |random_byte| {
+            entropy_baseline[entropy_idx] = random_byte;
+        } else |_| {
+            entropy_success = false;
+            break;
+        }
+    }
+
+    // Next 8 bytes: TSC mixed with hardware entropy
+    if (entropy_success) {
+        const tsc = asm volatile ("rdtsc"
+            : [_] "={eax},{edx}" (-> u64),
+        );
+        const tsc_bytes = @as([8]u8, @bitCast(tsc));
+        for (0..8) |i| {
+            if (rng.getRandom(u8)) |random_byte| {
+                entropy_baseline[entropy_idx + i] = tsc_bytes[i] ^ random_byte;
+            } else |_| {
+                entropy_baseline[entropy_idx + i] = tsc_bytes[i];
+            }
+        }
+        entropy_idx += 8;
+    }
+
+    // Next 8 bytes: Memory addresses and CPU info
+    if (entropy_success and entropy_idx < 24) {
+        const addr_mix = @as(u64, @intCast(@intFromPtr(runtime_services))) ^
+            @as(u64, @intCast(@intFromPtr(&platform_data)));
+        @memcpy(entropy_baseline[entropy_idx..][0..8], &@as([8]u8, @bitCast(addr_mix)));
+        entropy_idx += 8;
+    }
+
+    // Last 8 bytes: More hardware RNG or counter-based fallback
+    while (entropy_idx < 32) : (entropy_idx += 1) {
+        if (rng.getRandom(u8)) |random_byte| {
+            entropy_baseline[entropy_idx] = random_byte ^ @as(u8, @truncate(entropy_idx));
+        } else |_| {
+            // Fallback with TSC low byte and counter
+            const tsc_low = @as(u8, @truncate(asm volatile ("rdtsc"
+                : [_] "={eax}" (-> u32),
+            )));
+            entropy_baseline[entropy_idx] = tsc_low ^ @as(u8, @truncate(entropy_idx * 17));
+        }
+    }
+
+    // Copy the entropy baseline to platform data
+    @memcpy(platform_data[0..32], &entropy_baseline);
+    platform_data_size = 32;
+    serial.print("[KEYSTORE] Added 32 bytes of mixed entropy baseline\r\n", .{}) catch {};
+
     // Try to get system UUID
     const system_uuid_name = [_:0]u16{ 'S', 'y', 's', 't', 'e', 'm', 'U', 'U', 'I', 'D', 0 };
     const efi_global_guid align(8) = uefi.Guid{
@@ -117,10 +177,17 @@ pub fn deriveKey(
     );
 
     if (uuid_status == .success and uuid_size > 0) {
-        const copy_size = @min(uuid_size, 16);
-        @memcpy(platform_data[platform_data_size..][0..copy_size], uuid_buffer[0..copy_size]);
-        platform_data_size += copy_size;
-        serial.print("[KEYSTORE] Got system UUID ({} bytes)\r\n", .{copy_size}) catch {};
+        const copy_size = @min(uuid_size, @min(16, platform_data.len - platform_data_size));
+        if (copy_size > 0) {
+            // XOR with existing data instead of overwriting for better entropy mixing
+            for (0..copy_size) |i| {
+                platform_data[platform_data_size + i] ^= uuid_buffer[i];
+            }
+            platform_data_size += copy_size;
+            serial.print("[KEYSTORE] Mixed system UUID ({} bytes)\r\n", .{copy_size}) catch {};
+        }
+    } else {
+        serial.print("[KEYSTORE] System UUID not available (status: {})\r\n", .{uuid_status}) catch {};
     }
 
     // Add current timestamp as additional uniqueness
@@ -131,9 +198,44 @@ pub fn deriveKey(
         if (runtime_services.getTime(&current_time, &capabilities) == .success) {
             const time_bytes = @as([*]const u8, @ptrCast(&current_time))[0..@sizeOf(uefi.Time)];
             const copy_size = @min(@sizeOf(uefi.Time), platform_data.len - platform_data_size);
-            @memcpy(platform_data[platform_data_size..][0..copy_size], time_bytes[0..copy_size]);
-            platform_data_size += copy_size;
+            if (copy_size > 0) {
+                @memcpy(platform_data[platform_data_size..][0..copy_size], time_bytes[0..copy_size]);
+                platform_data_size += copy_size;
+                serial.print("[KEYSTORE] Added timestamp ({} bytes)\r\n", .{copy_size}) catch {};
+            }
         }
+    }
+
+    // Add memory layout entropy (ASLR-related)
+    if (platform_data_size < platform_data.len - 8) {
+        const mem_entropy = @as(u64, @intCast(@intFromPtr(&platform_data))) ^
+            (@as(u64, hw_entropy[0]) << 32 | @as(u64, hw_entropy[1]));
+        @memcpy(platform_data[platform_data_size..][0..8], &@as([8]u8, @bitCast(mem_entropy)));
+        platform_data_size += 8;
+    }
+
+    // Add more entropy sources to ensure we have enough unique bytes
+    if (platform_data_size < platform_data.len - 8) {
+        // Mix in TSC again with different timing
+        const tsc2 = asm volatile ("rdtsc"
+            : [_] "={eax},{edx}" (-> u64),
+        );
+        const tsc_mixed = tsc2 ^ (@as(u64, hw_entropy[2]) << 16);
+        @memcpy(platform_data[platform_data_size..][0..8], &@as([8]u8, @bitCast(tsc_mixed)));
+        platform_data_size += 8;
+    }
+
+    // Add CPU ID information for more entropy
+    if (platform_data_size < platform_data.len - 4) {
+        var cpu_info: u32 = 0;
+        asm volatile (
+            \\cpuid
+            : [_] "={eax}" (cpu_info),
+            : [_] "{eax}" (@as(u32, 1)),
+            : "ebx", "ecx", "edx"
+        );
+        @memcpy(platform_data[platform_data_size..][0..4], &@as([4]u8, @bitCast(cpu_info)));
+        platform_data_size += 4;
     }
 
     // Fill remaining space with key type and counter
@@ -142,9 +244,33 @@ pub fn deriveKey(
         platform_data_size += 1;
     }
 
+    // Ensure we have at least 16 bytes for HMAC
+    if (platform_data_size < 16) {
+        // Emergency fallback: fill with hardware entropy
+        serial.print("[KEYSTORE] WARNING: Platform data too small ({} bytes), adding entropy\r\n", .{platform_data_size}) catch {};
+        while (platform_data_size < 16) {
+            if (rng.getRandom(u8)) |random_byte| {
+                platform_data[platform_data_size] = random_byte;
+            } else |_| {
+                // Last resort: use counter mixed with TSC
+                const tsc_low = @as(u8, @truncate(asm volatile ("rdtsc"
+                    : [_] "={eax}" (-> u32),
+                )));
+                platform_data[platform_data_size] = @as(u8, @truncate(platform_data_size)) ^ tsc_low;
+            }
+            platform_data_size += 1;
+        }
+    }
+
+    serial.print("[KEYSTORE] Total platform data size: {} bytes\r\n", .{platform_data_size}) catch {};
+
     // Step 3: Use PBKDF2-style key derivation
-    const iterations = 100000;
+    // Use reduced iterations in development mode for faster debugging
+    const security_config = @import("security_config");
+    const iterations: u32 = if (security_config.build_mode == .debug) 1000 else 100000;
     var derived_key: [32]u8 = hw_entropy;
+
+    serial.print("[KEYSTORE] Using {} PBKDF2 iterations\r\n", .{iterations}) catch {};
 
     // Simple PBKDF2 using HMAC-SHA256
     var iter: u32 = 0;
@@ -156,7 +282,25 @@ pub fn deriveKey(
         @memcpy(prf_input[32..36], &iter_bytes);
 
         // Apply HMAC with platform data as key
-        const hmac_result = hmac.hmacSha256(platform_data[0..platform_data_size], &prf_input) catch {
+        const hmac_result = hmac.hmacSha256(platform_data[0..platform_data_size], &prf_input) catch |err| {
+            serial.print("[KEYSTORE] HMAC failed at iteration {}: {}\r\n", .{ iter, err }) catch {};
+            serial.print("[KEYSTORE] Platform data size: {} bytes\r\n", .{platform_data_size}) catch {};
+
+            // Log first few bytes of platform data for debugging (safely)
+            if (platform_data_size > 0) {
+                var unique_count: u32 = 0;
+                var seen = [_]bool{false} ** 256;
+
+                for (platform_data[0..platform_data_size]) |byte| {
+                    if (!seen[byte]) {
+                        seen[byte] = true;
+                        unique_count += 1;
+                    }
+                }
+
+                serial.print("[KEYSTORE] Platform data entropy: {} unique bytes out of {}\r\n", .{ unique_count, platform_data_size }) catch {};
+            }
+
             return KeyError.KeyDerivationFailed;
         };
 
