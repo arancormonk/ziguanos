@@ -10,6 +10,9 @@ const acpi = @import("../drivers/acpi/acpi.zig");
 const heap = @import("../memory/heap.zig");
 const uefi_boot = @import("../boot/uefi_boot.zig");
 const allocator = @import("../memory/allocator.zig");
+const per_cpu = @import("../smp/per_cpu.zig");
+const cpu_local = @import("../smp/cpu_local.zig");
+const smp_test = @import("../smp/test.zig");
 
 // Store boot info for ACPI initialization
 var saved_boot_info: ?*const uefi_boot.UEFIBootInfo = null;
@@ -21,6 +24,23 @@ pub fn setBootInfo(boot_info: *const uefi_boot.UEFIBootInfo) void {
 
 /// Initialize hardware components
 pub fn init() void {
+    // Initialize per-CPU infrastructure for BSP
+    per_cpu.initBsp() catch |err| {
+        serial.println("[KERNEL] Per-CPU init failed: {s}", .{@errorName(err)});
+        serial.flush();
+        // This is fatal, we need per-CPU infrastructure
+        @panic("Failed to initialize per-CPU infrastructure");
+    };
+
+    cpu_local.initBsp() catch |err| {
+        serial.println("[KERNEL] CPU-local storage init failed: {s}", .{@errorName(err)});
+        serial.flush();
+        @panic("Failed to initialize CPU-local storage");
+    };
+
+    serial.println("[KERNEL] Per-CPU infrastructure initialized", .{});
+    serial.flush();
+
     // Initialize enhanced interrupt handling
     interrupts.init();
     serial.println("[KERNEL] Enhanced interrupt handling initialized", .{});
@@ -59,6 +79,12 @@ pub fn init() void {
     if (apic.isAvailable()) {
         apic.printInfo();
         serial.println("[KERNEL] APIC initialized successfully", .{});
+
+        // Update BSP's APIC ID now that APIC is initialized
+        const APIC_ID_REG = 0x20; // APIC ID register offset
+        const apic_id = @as(u8, @truncate(apic.readRegister(APIC_ID_REG) >> 24));
+        per_cpu.updateBspApicId(apic_id);
+        serial.println("[KERNEL] BSP APIC ID updated: {d}", .{apic_id});
         serial.flush();
 
         // Test APIC functionality
@@ -72,6 +98,13 @@ pub fn init() void {
     timer.init();
     timer.printInfo();
     serial.flush(); // Ensure timer initialization is visible
+
+    // Test per-CPU infrastructure
+    serial.println("[KERNEL] Testing per-CPU infrastructure...", .{});
+    smp_test.testPerCpuInfrastructure() catch |err| {
+        serial.println("[KERNEL] Per-CPU infrastructure test failed: {s}", .{@errorName(err)});
+        serial.flush();
+    };
 }
 
 /// Prepare for interrupt enabling
