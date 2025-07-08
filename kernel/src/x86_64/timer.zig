@@ -431,20 +431,27 @@ pub fn getUptime() u64 {
 
     // Intel x86 security guideline: Prevent integer overflow
     // For a 100Hz timer, this protects against overflow for ~585 million years
+    // TIMER_FREQUENCY = 100Hz means each tick is 10ms
     const uptime_ms = std.math.mul(u64, ticks, 1000) catch {
         // On overflow, return maximum safe value
         serial.println("[TIMER] WARNING: Uptime overflow detected after {} ticks", .{ticks});
         _ = timer_overflows.fetchAdd(1, .monotonic);
-        return @divFloor(std.math.maxInt(u64), @as(u64, TIMER_FREQUENCY));
+        return std.math.maxInt(u64);
     };
 
-    return uptime_ms / TIMER_FREQUENCY;
+    // Return actual milliseconds (ticks * 1000 / 100)
+    return @divFloor(uptime_ms, @as(u64, TIMER_FREQUENCY));
 }
 
 // Get timer tick count
 pub fn getTicks() u64 {
     // Use atomic load for multicore safety
     return timer_ticks.load(.acquire);
+}
+
+// Get TSC frequency in Hz
+pub fn getTSCFrequency() u64 {
+    return tsc_frequency.load(.acquire);
 }
 
 // High-precision delay using TSC with overflow protection

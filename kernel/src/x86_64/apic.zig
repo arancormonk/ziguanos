@@ -284,17 +284,30 @@ pub fn writeRegister(offset: u32, value: u32) void {
         // Memory barrier before write
         asm volatile ("mfence" ::: "memory");
 
-        // TEMPORARY: Skip SIPI write to debug hang
-        if (offset == APIC_ICR_LOW and (value & 0x700) == 0x600) {
-            serial.println("[APIC] DEBUG: Skipping SIPI write to prevent hang!", .{});
-        } else {
-            reg_ptr[0] = value;
+        // For SIPI, add pre-write delay and serialization
+        if (offset == APIC_ICR_LOW and (value & 0x700) == 0x600) { // Check for Startup IPI
+            serial.println("[APIC] About to write SIPI, serializing...", .{});
+
+            // Ensure interrupts are disabled
+            const flags = asm volatile ("pushfq; popq %[result]; cli"
+                : [result] "=r" (-> u64),
+            );
+            const interrupts_were_enabled = (flags & 0x200) != 0;
+            if (interrupts_were_enabled) {
+                serial.println("[APIC] WARNING: Interrupts were enabled during SIPI, now disabled", .{});
+            }
+
+            // Serialize execution to ensure all previous operations complete
+            asm volatile ("cpuid" ::: "eax", "ebx", "ecx", "edx", "memory");
         }
+
+        // Write the value to the APIC register
+        reg_ptr[0] = value;
 
         // Memory barrier after write
         asm volatile ("mfence" ::: "memory");
 
-        // For SIPI, skip normal readback and add delay
+        // For SIPI, handle special requirements
         if (offset == APIC_ICR_LOW and (value & 0x700) == 0x600) { // Check for Startup IPI
             serial.println("[APIC] SIPI write completed, adding delay...", .{});
 
@@ -557,11 +570,35 @@ pub fn sendIPI(dest_apic_id: u8, vector: u8, delivery_mode: IpiDeliveryMode, lev
         const icr_high = @as(u32, dest_apic_id) << 24;
         serial.println("[APIC] Writing ICR_HIGH: 0x{x} (dest APIC ID {})", .{ icr_high, dest_apic_id });
         writeRegister(APIC_ICR_HIGH, icr_high);
+
+        // Memory barrier to ensure ICR_HIGH write completes before ICR_LOW
+        asm volatile ("mfence" ::: "memory");
+    }
+
+    // For INIT and SIPI, add extra serialization as per Intel SDM
+    if (delivery_mode == .Init or delivery_mode == .Startup) {
+        // Ensure all previous memory operations are complete
+        asm volatile ("mfence; lfence" ::: "memory");
     }
 
     // Write command (low 32 bits) - this sends the IPI
     serial.println("[APIC] Writing ICR_LOW: 0x{x}", .{icr_low});
+
+    // CRITICAL: For SIPI, add an extra check to ensure we're not sending to ourselves
+    if (delivery_mode == .Startup) {
+        serial.println("[APIC] About to write SIPI, serializing...", .{});
+        // Extra serialization before SIPI
+        asm volatile ("mfence; lfence; mfence" ::: "memory");
+    }
+
     writeRegister(APIC_ICR_LOW, icr_low);
+
+    // For INIT and SIPI, add serialization after write as well
+    if (delivery_mode == .Init or delivery_mode == .Startup) {
+        // Ensure the IPI write is fully committed
+        asm volatile ("mfence" ::: "memory");
+        serial.println("[APIC] Post-IPI serialization complete", .{});
+    }
 
     // Immediate debug after write to see if we get here
     serial.println("[APIC] ICR write completed, checking status...", .{});

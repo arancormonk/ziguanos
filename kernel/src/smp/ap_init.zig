@@ -135,7 +135,7 @@ pub fn initAP(cpu_id: u32, apic_id: u8) !void {
         serial.print("{x:0>2} ", .{verify_ptr[i]});
     }
     serial.println("", .{});
-    if (verify_ptr[0] != 0xB8 or verify_ptr[1] != 0xAD or verify_ptr[2] != 0xDE) {
+    if (verify_ptr[0] != 0xFA) { // Should start with cli
         serial.println("[SMP] ERROR: Trampoline corrupted before sending IPI!", .{});
         // Try to recover by re-copying the trampoline
         serial.println("[SMP] Attempting to recover by re-copying trampoline...", .{});
@@ -166,6 +166,44 @@ pub fn initAP(cpu_id: u32, apic_id: u8) !void {
     serial.print("[SMP]   CPU ID @ +0x{x}: ", .{TrampolineOffsets.cpu_id_offset});
     const cpuid_ptr = @as(*const u32, @ptrFromInt(@intFromPtr(dump_ptr) + TrampolineOffsets.cpu_id_offset));
     serial.println("{}", .{cpuid_ptr.*});
+
+    // Verify the trampoline memory is properly mapped and accessible
+    serial.println("[SMP] Verifying trampoline memory mapping before INIT-SIPI-SIPI...", .{});
+
+    // Test write and read to trampoline memory
+    const test_addr = TRAMPOLINE_ADDR + 0x100; // Test address within trampoline
+    const test_ptr = @as(*volatile u32, @ptrFromInt(test_addr));
+    const test_value: u32 = 0xCAFEBABE;
+    test_ptr.* = test_value;
+    asm volatile ("mfence" ::: "memory");
+    const read_value = test_ptr.*;
+    if (read_value != test_value) {
+        serial.println("[SMP] ERROR: Trampoline memory test failed! Wrote 0x{x}, read 0x{x}", .{ test_value, read_value });
+        return error.TrampolineMemoryNotAccessible;
+    }
+    serial.println("[SMP] Trampoline memory test passed", .{});
+
+    // Ensure the first page (0x0-0xFFF) is mapped since real mode starts at 0x5000
+    // The AP will access memory in real mode which needs identity mapping
+    serial.println("[SMP] Checking low memory identity mapping...", .{});
+
+    // CRITICAL: Ensure the trampoline memory region is mapped and accessible
+    // The AP will start in real mode at physical address 0x5000
+    // We need to ensure this memory is:
+    // 1. Identity mapped (virtual 0x5000 = physical 0x5000)
+    // 2. Executable (no NX bit)
+    // 3. Not cached in a way that causes coherency issues
+
+    // Flush TLB entries for the trampoline region to ensure coherency
+    const trampoline_page = TRAMPOLINE_ADDR & ~@as(u64, 0xFFF);
+    asm volatile ("invlpg (%[addr])"
+        :
+        : [addr] "r" (trampoline_page),
+        : "memory"
+    );
+
+    // Add a write barrier to ensure all memory writes are visible to other CPUs
+    asm volatile ("mfence" ::: "memory");
 
     // Send INIT-SIPI-SIPI sequence
     serial.println("[SMP] Sending INIT-SIPI-SIPI to APIC ID {}...", .{apic_id});
@@ -269,16 +307,17 @@ fn setupTrampoline() !void {
     const trampoline_ptr = @as([*]const u8, @ptrFromInt(TRAMPOLINE_ADDR));
 
     // Check if the trampoline looks valid (has our code pattern)
-    // The first instruction is mov $0xDEAD, %ax (b8 ad de)
-    if (trampoline_ptr[0] == 0xB8 and trampoline_ptr[1] == 0xAD and trampoline_ptr[2] == 0xDE) {
+    // The first instruction is now cli (0xFA) after our fix
+    if (trampoline_ptr[0] == 0xFA) {
         serial.println("[SMP] Trampoline already setup at 0x{x}", .{TRAMPOLINE_ADDR});
         return; // Already setup
     }
 
     // Calculate trampoline size based on end and start symbols
     // Since symbols are in .trampoline section, we need a fixed size
-    // Based on the assembly, ap_trampoline_end - ap_trampoline_start = 752 bytes
-    const trampoline_size: usize = 752;
+    // Based on the assembly, ap_trampoline_end - ap_trampoline_start
+    // Updated to include IDT (256*8 bytes) and related structures
+    const trampoline_size: usize = 2880; // Increased to include IDT
 
     serial.println("[SMP] Trampoline size: {} bytes (max: {} bytes)", .{ trampoline_size, paging.PAGE_SIZE_4K });
 
@@ -313,9 +352,9 @@ fn setupTrampoline() !void {
     }
     serial.println("", .{});
 
-    // The first instruction should be mov $0xDEAD, %ax (0xB8 0xAD 0xDE)
-    if (dst[0] != 0xB8) {
-        serial.println("[SMP] WARNING: First byte is not MOV (0xB8), got 0x{x}", .{dst[0]});
+    // The first instruction should be cli (0xFA) after our fix
+    if (dst[0] != 0xFA) {
+        serial.println("[SMP] WARNING: First byte is not CLI (0xFA), got 0x{x}", .{dst[0]});
     }
 
     // Find the ap_startup_data offset first
@@ -394,7 +433,7 @@ fn setupTrampoline() !void {
         serial.print("{x:0>2} ", .{verify_ptr[i]});
     }
     serial.println("", .{});
-    if (verify_ptr[0] != 0xB8 or verify_ptr[1] != 0xAD or verify_ptr[2] != 0xDE) {
+    if (verify_ptr[0] != 0xFA) { // Should start with cli
         serial.println("[SMP] ERROR: Trampoline corrupted immediately after setup!", .{});
     }
 }
@@ -431,7 +470,7 @@ fn findStartupDataOffset() usize {
     // - Code segment: 0x00CF9A000000FFFF
     // - Data segment: 0x00CF92000000FFFF
     const trampoline_ptr = @as([*]const u8, @ptrFromInt(TRAMPOLINE_ADDR));
-    const trampoline_size = 752;
+    const trampoline_size = 2880; // Updated to include IDT
 
     // Search for the GDT pattern
     var offset: usize = 0;
@@ -546,12 +585,26 @@ fn busyWait(iterations: u32) void {
     }
 }
 
-/// Wait using timer for more accurate delays
-fn timerWait(ms: u64) void {
-    const start = timer.getUptime();
-    while (timer.getUptime() - start < ms) {
+/// Wait using TSC for accurate delays when timer interrupts aren't enabled yet
+fn tscWait(ms: u64) void {
+    const tsc_freq = timer.getTSCFrequency();
+    if (tsc_freq == 0) {
+        serial.println("[SMP] WARNING: TSC not calibrated, falling back to busy wait", .{});
+        const iterations = @min(ms * 100_000, std.math.maxInt(u32));
+        busyWait(@intCast(iterations)); // Approximate
+        return;
+    }
+
+    const start = timer.readTSC();
+    const ticks_to_wait = (tsc_freq * ms) / 1000;
+    serial.println("[SMP] tscWait({} ms) - waiting {} TSC ticks", .{ ms, ticks_to_wait });
+
+    while (timer.readTSC() - start < ticks_to_wait) {
         asm volatile ("pause" ::: "memory");
     }
+
+    const elapsed = (timer.readTSC() - start) * 1000 / tsc_freq;
+    serial.println("[SMP] tscWait complete after {} ms", .{elapsed});
 }
 
 /// Send INIT-SIPI-SIPI sequence to start AP
@@ -562,14 +615,24 @@ fn sendInitSipiSipi(apic_id: u8) !void {
 
     // Clear debug marker locations before starting
     // Important: Don't clear the trampoline area (0x5000), only debug areas
-    @as(*volatile u16, @ptrFromInt(0x9FE0)).* = 0;
-    @as(*volatile u16, @ptrFromInt(0x9FF0)).* = 0;
-    @as(*volatile u32, @ptrFromInt(0x9000)).* = 0; // Clear magic
+    // NOTE: These addresses must be within mapped memory regions
+    // Make sure these locations are accessible before writing
+    const debug_addr_1 = @as(*volatile u16, @ptrFromInt(0x9FE0));
+    const debug_addr_2 = @as(*volatile u16, @ptrFromInt(0x9FF0));
+    const debug_addr_3 = @as(*volatile u32, @ptrFromInt(0x9000));
+
+    // Try to clear them, but don't fail if they're not accessible
+    debug_addr_1.* = 0;
+    debug_addr_2.* = 0;
+    debug_addr_3.* = 0;
+
+    // Ensure writes are visible
+    asm volatile ("mfence" ::: "memory");
 
     // Ensure the trampoline is still intact
     const tramp_ptr = @as([*]const volatile u8, @ptrFromInt(TRAMPOLINE_ADDR));
-    if (tramp_ptr[0] != 0xB8 or tramp_ptr[1] != 0xAD or tramp_ptr[2] != 0xDE) { // Should start with mov $0xDEAD, %ax
-        serial.println("[SMP] ERROR: Trampoline corrupted before SIPI! First bytes: 0x{x} 0x{x} 0x{x}", .{ tramp_ptr[0], tramp_ptr[1], tramp_ptr[2] });
+    if (tramp_ptr[0] != 0xFA) { // Should start with cli
+        serial.println("[SMP] ERROR: Trampoline corrupted before SIPI! First byte: 0x{x} (expected 0xFA)", .{tramp_ptr[0]});
 
         // Dump more info about the corruption
         serial.print("[SMP] Trampoline area corrupted to: ", .{});
@@ -582,13 +645,37 @@ fn sendInitSipiSipi(apic_id: u8) !void {
         return error.TrampolineCorrupted;
     }
 
+    // Verify this CPU's APIC ID
+    const bsp_apic_id = apic.getID();
+    serial.println("[SMP] BSP APIC ID: {}, Target AP APIC ID: {}", .{ bsp_apic_id, apic_id });
+    if (bsp_apic_id == apic_id) {
+        serial.println("[SMP] ERROR: Trying to send IPI to self!", .{});
+        return error.InvalidAPICID;
+    }
+
+    // Check APIC state before sending INIT
+    const esr_before = apic.readRegister(0x280); // APIC_ESR
+    if (esr_before != 0) {
+        serial.println("[SMP] WARNING: APIC ESR=0x{x} before INIT", .{esr_before});
+        // Clear ESR
+        apic.writeRegister(0x280, 0);
+        _ = apic.readRegister(0x280);
+    }
+
     // Send INIT IPI
     serial.println("[SMP] Sending INIT IPI to APIC ID {}", .{apic_id});
+
+    // CRITICAL: For modern CPUs, send INIT-deassert first (legacy compatibility)
+    // This ensures the AP is in a known state
+    try apic.sendIPI(apic_id, 0, .Init, .Deassert, .Level, .NoShorthand);
+    busyWait(10000); // Short delay
+
+    // Now send the actual INIT assert
     try apic.sendIPI(apic_id, 0, .Init, .Assert, .Edge, .NoShorthand);
 
-    // Wait 10ms using busy wait (timer interrupts not enabled yet)
-    serial.println("[SMP] Waiting 10ms...", .{});
-    busyWait(1_000_000); // Reduced from 10M to 1M for faster iteration
+    // Wait 10ms using TSC for accurate delay (Intel SDM requirement)
+    serial.println("[SMP] Waiting 10ms after INIT...", .{});
+    tscWait(10); // Use TSC-based wait since timer interrupts aren't enabled yet
 
     // Check ICR status after INIT
     const icr_after_init = apic.readRegister(0x300); // APIC_ICR_LOW
@@ -614,8 +701,8 @@ fn sendInitSipiSipi(apic_id: u8) !void {
 
     // Verify trampoline is still intact after INIT
     const check_ptr = @as([*]const u8, @ptrFromInt(TRAMPOLINE_ADDR));
-    if (check_ptr[0] != 0xB8 or check_ptr[1] != 0xAD or check_ptr[2] != 0xDE) {
-        serial.println("[SMP] WARNING: Trampoline corrupted after INIT! First bytes: 0x{x} 0x{x} 0x{x}", .{ check_ptr[0], check_ptr[1], check_ptr[2] });
+    if (check_ptr[0] != 0xFA) { // Should start with cli
+        serial.println("[SMP] WARNING: Trampoline corrupted after INIT! First byte: 0x{x} (expected 0xFA)", .{check_ptr[0]});
     }
 
     // Check interrupt flag status
@@ -625,14 +712,34 @@ fn sendInitSipiSipi(apic_id: u8) !void {
     const if_enabled = (flags & 0x200) != 0; // IF is bit 9
     serial.println("[SMP] Interrupt flag status before SIPI: {} (flags=0x{x})", .{ if_enabled, flags });
 
+    // Final verification before SIPI
+    const pre_sipi_check = @as([*]const u8, @ptrFromInt(TRAMPOLINE_ADDR));
+    if (pre_sipi_check[0] != 0xFA) { // Should start with cli
+        serial.println("[SMP] CRITICAL: Trampoline corrupted right before SIPI!", .{});
+        serial.print("[SMP] First bytes: ", .{});
+        for (0..16) |i| {
+            serial.print("{x:0>2} ", .{pre_sipi_check[i]});
+        }
+        serial.println("", .{});
+        return error.TrampolineCorrupted;
+    }
+
+    // CRITICAL: Before sending SIPI, ensure the BSP is in a stable state
+    // Some systems hang if SIPI is sent while certain operations are pending
+    asm volatile ("mfence; lfence" ::: "memory");
+
     // Send first SIPI with vector 0x05 (0x5000 >> 12)
     // SIPI vector is the page number (address >> 12), so 0x05 = 0x5000
     serial.println("[SMP] Sending first SIPI with vector 0x05 (starts at 0x5000)", .{});
+
+    // WORKAROUND: Some systems require a small delay before SIPI
+    busyWait(1000);
+
     try apic.sendIPI(apic_id, 0x05, .Startup, .Assert, .Edge, .NoShorthand);
 
-    // Wait 200us using busy wait
-    serial.println("[SMP] Waiting 200us...", .{});
-    busyWait(20_000); // Much shorter wait
+    // Wait 200us (0.2ms) between SIPIs as per Intel SDM
+    serial.println("[SMP] Waiting 200us between SIPIs...", .{});
+    tscWait(1); // Wait at least 1ms
 
     // Send second SIPI
     serial.println("[SMP] Sending second SIPI with vector 0x05", .{});

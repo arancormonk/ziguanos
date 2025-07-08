@@ -17,19 +17,20 @@ ap_trampoline_start:
 # Real mode startup code (16-bit)
 .code16
 ap_rm_entry:
-    # First thing: write a marker to show we're executing
-    # Write 0xDEAD to address 0x9FE0 using direct addressing
-    mov $0xDEAD, %ax
-    mov %ax, 0x9FE0
-    
-    # Don't write to VGA memory - it may not be mapped and can cause issues
-    # Just continue with initialization
+    # CRITICAL: Do NOT write to any memory locations until segments are properly set up
+    # Writing to unmapped or invalid memory in real mode can cause system hangs
     
     cli
     
-    # Load data segment
+    # Load data segment FIRST before any memory accesses
     xor %ax, %ax
     mov %ax, %ds
+    mov %ax, %es
+    
+    # Now it's safe to write debug markers
+    # Write 0xDEAD to address 0x9FE0 using direct addressing
+    mov $0xDEAD, %ax
+    mov %ax, 0x9FE0
     
     # Write another marker to show we got past segment setup
     # Write 0xBEEF to address 0x9FF0 to indicate real mode entry
@@ -63,6 +64,15 @@ ap_rm_entry:
     # CS = 0x08 (code segment), EIP = 32-bit entry relative to 0x5000
     ljmp $0x08, $(ap_pm_entry - ap_trampoline_start + 0x5000)
 
+# Simple exception handler for 32-bit mode
+.code32
+ap_exception_handler:
+    # Write exception marker
+    movl $0xDEADBEEF, 0x9FF4
+    # Halt
+1:  hlt
+    jmp 1b
+
 # Protected mode code (32-bit)
 .code32
 .align 16
@@ -77,6 +87,10 @@ ap_pm_entry:
     mov %ax, %fs
     mov %ax, %gs
     mov %ax, %ss
+    
+    # CRITICAL: Load a minimal IDT to prevent triple fault
+    # This prevents exceptions from causing a system hang
+    lidt (ap_idtr - ap_trampoline_start + 0x5000)
     
     # Write debug info: ProtectedMode32 stage (2)
     movl $0x12345678, 0x9000       # Magic
@@ -169,6 +183,27 @@ ap_gdt_end:
 ap_gdtr:
     .word ap_gdt_end - ap_gdt - 1  # Limit
     .long ap_gdt - ap_trampoline_start + 0x5000  # Base (physical address)
+
+# Minimal IDT with simple exception handler
+.align 16
+ap_idt:
+    # First 32 entries point to simple handler (exceptions)
+    .rept 32
+    .word ap_exception_handler - ap_trampoline_start + 0x5000  # Offset 15:0
+    .word 0x08                     # Code segment selector
+    .byte 0                        # IST (not used in 32-bit)
+    .byte 0x8E                     # Type: 32-bit interrupt gate, DPL=0, Present
+    .word 0                        # Offset 31:16 (high bits zero for 32-bit)
+    .endr
+    # Remaining entries are null
+    .fill 224, 8, 0
+ap_idt_end:
+
+# IDT pointer
+.align 16
+ap_idtr:
+    .word ap_idt_end - ap_idt - 1  # Limit
+    .long ap_idt - ap_trampoline_start + 0x5000  # Base (physical address)
 
 # Variables populated by BSP
 .align 8
