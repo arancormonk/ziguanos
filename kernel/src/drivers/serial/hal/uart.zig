@@ -3,12 +3,24 @@
 
 // Raw UART hardware access layer
 // This module provides the minimal hardware interface for UART operations
+//
+// Thread-Safety: All functions in this module are thread-safe for SMP systems.
+// A global spinlock ensures serialized access to UART hardware registers.
 
 const io = @import("port_io.zig");
 const regs = @import("registers.zig");
+const spinlock = @import("../../../lib/spinlock.zig");
+
+/// Global spinlock for serializing UART hardware access
+/// This ensures thread-safety for SMP systems
+var uart_lock: spinlock.SpinLock = spinlock.SpinLock{};
 
 /// Initialize a UART port with the specified base port and baud rate
 pub fn init(base_port: u16, baud_rate: u32) void {
+    // Acquire spinlock for hardware access
+    var guard = spinlock.SpinLockGuard.init(&uart_lock);
+    defer guard.deinit();
+
     // Calculate divisor for baud rate
     const divisor = @as(u16, @intCast(115200 / baud_rate));
 
@@ -41,6 +53,15 @@ pub fn init(base_port: u16, baud_rate: u32) void {
 
 /// Write a single byte to the UART
 pub fn writeByte(base_port: u16, byte: u8) void {
+    // Acquire spinlock for hardware access
+    var guard = spinlock.SpinLockGuard.init(&uart_lock);
+    defer guard.deinit();
+
+    writeByteInternal(base_port, byte);
+}
+
+/// Internal write byte function (assumes lock is already held)
+fn writeByteInternal(base_port: u16, byte: u8) void {
     // Wait for transmit buffer to be empty
     var timeout: u32 = 10000;
     while (timeout > 0) : (timeout -= 1) {
@@ -57,13 +78,21 @@ pub fn writeByte(base_port: u16, byte: u8) void {
 
 /// Write a string to the UART
 pub fn writeString(base_port: u16, str: []const u8) void {
+    // Acquire spinlock once for the entire string
+    var guard = spinlock.SpinLockGuard.init(&uart_lock);
+    defer guard.deinit();
+
     for (str) |byte| {
-        writeByte(base_port, byte);
+        writeByteInternal(base_port, byte);
     }
 }
 
 /// Read a byte from the UART (non-blocking)
 pub fn readByte(base_port: u16) ?u8 {
+    // Acquire spinlock for hardware access
+    var guard = spinlock.SpinLockGuard.init(&uart_lock);
+    defer guard.deinit();
+
     const status = io.inb(base_port + regs.LSR);
     if ((status & regs.LSR_DATA_READY) != 0) {
         return io.inb(base_port + regs.DATA);
@@ -73,38 +102,66 @@ pub fn readByte(base_port: u16) ?u8 {
 
 /// Check if the UART is ready to transmit
 pub fn isTransmitReady(base_port: u16) bool {
+    // Acquire spinlock for hardware access
+    var guard = spinlock.SpinLockGuard.init(&uart_lock);
+    defer guard.deinit();
+
     const status = io.inb(base_port + regs.LSR);
     return (status & regs.LSR_TRANSMIT_HOLDING_EMPTY) != 0;
 }
 
 /// Check if the UART has received data
 pub fn hasReceivedData(base_port: u16) bool {
+    // Acquire spinlock for hardware access
+    var guard = spinlock.SpinLockGuard.init(&uart_lock);
+    defer guard.deinit();
+
     const status = io.inb(base_port + regs.LSR);
     return (status & regs.LSR_DATA_READY) != 0;
 }
 
 /// Get the line status register
 pub fn getLineStatus(base_port: u16) u8 {
+    // Acquire spinlock for hardware access
+    var guard = spinlock.SpinLockGuard.init(&uart_lock);
+    defer guard.deinit();
+
     return io.inb(base_port + regs.LSR);
 }
 
 /// Get the modem status register
 pub fn getModemStatus(base_port: u16) u8 {
+    // Acquire spinlock for hardware access
+    var guard = spinlock.SpinLockGuard.init(&uart_lock);
+    defer guard.deinit();
+
     return io.inb(base_port + regs.MSR);
 }
 
 /// Enable interrupts on the UART
 pub fn enableInterrupts(base_port: u16, interrupts: u8) void {
+    // Acquire spinlock for hardware access
+    var guard = spinlock.SpinLockGuard.init(&uart_lock);
+    defer guard.deinit();
+
     io.outb(base_port + regs.IER, interrupts);
 }
 
 /// Disable all interrupts on the UART
 pub fn disableInterrupts(base_port: u16) void {
+    // Acquire spinlock for hardware access
+    var guard = spinlock.SpinLockGuard.init(&uart_lock);
+    defer guard.deinit();
+
     io.outb(base_port + regs.IER, 0x00);
 }
 
 /// Basic self-test using scratch register
 pub fn selfTest(base_port: u16) bool {
+    // Acquire spinlock for hardware access
+    var guard = spinlock.SpinLockGuard.init(&uart_lock);
+    defer guard.deinit();
+
     const test_values = [_]u8{ 0x55, 0xAA, 0x00, 0xFF };
     for (test_values) |value| {
         io.outb(base_port + regs.SCR, value);

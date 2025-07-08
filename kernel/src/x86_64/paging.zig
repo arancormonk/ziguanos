@@ -1353,6 +1353,39 @@ pub fn testAllPagingFeatures() void {
     testPagingMemoryProtection();
 }
 
+/// Make a memory region executable (removes NX bit)
+/// This is needed for the AP trampoline code
+pub fn makeRegionExecutable(start_addr: u64, size: u64) !void {
+    const aligned_start = start_addr & ~@as(u64, PAGE_SIZE_4K - 1);
+    const aligned_end = (start_addr + size + PAGE_SIZE_4K - 1) & ~@as(u64, PAGE_SIZE_4K - 1);
+
+    serial.println("[PAGING] Making region 0x{x}-0x{x} executable", .{ aligned_start, aligned_end });
+
+    // For the trampoline at 0x8000, we need to handle the first 2MB page specially
+    if (aligned_start < PAGE_SIZE_2M) {
+        // The first 2MB is mapped directly in kernel_pd[0]
+        const old_entry = kernel_pd[0];
+        serial.println("[PAGING] First 2MB page entry: 0x{x}", .{old_entry});
+
+        if ((old_entry & PAGE_NO_EXECUTE) != 0) {
+            // Remove NX bit
+            const new_entry = old_entry & ~PAGE_NO_EXECUTE;
+            kernel_pd[0] = new_entry;
+            serial.println("[PAGING] Updated first 2MB page entry to: 0x{x} (removed NX bit)", .{new_entry});
+
+            // Flush TLB for the entire 2MB page
+            var flush_addr: u64 = 0;
+            while (flush_addr < PAGE_SIZE_2M) : (flush_addr += PAGE_SIZE_4K) {
+                invalidatePage(flush_addr);
+            }
+        } else {
+            serial.println("[PAGING] First 2MB page already executable", .{});
+        }
+    }
+
+    serial.println("[PAGING] Region made executable", .{});
+}
+
 // Update page flags without changing the physical address
 // This is useful for changing permissions on existing mappings
 pub fn updatePageFlags(virt_addr: u64, new_flags: u64) !void {

@@ -13,6 +13,8 @@ const allocator = @import("../memory/allocator.zig");
 const per_cpu = @import("../smp/per_cpu.zig");
 const cpu_local = @import("../smp/cpu_local.zig");
 const smp_test = @import("../smp/test.zig");
+const ap_init = @import("../smp/ap_init.zig");
+const error_utils = @import("../lib/error_utils.zig");
 
 // Store boot info for ACPI initialization
 var saved_boot_info: ?*const uefi_boot.UEFIBootInfo = null;
@@ -26,14 +28,14 @@ pub fn setBootInfo(boot_info: *const uefi_boot.UEFIBootInfo) void {
 pub fn init() void {
     // Initialize per-CPU infrastructure for BSP
     per_cpu.initBsp() catch |err| {
-        serial.println("[KERNEL] Per-CPU init failed: {s}", .{@errorName(err)});
+        serial.println("[KERNEL] Per-CPU init failed: {s}", .{error_utils.errorToString(err)});
         serial.flush();
         // This is fatal, we need per-CPU infrastructure
         @panic("Failed to initialize per-CPU infrastructure");
     };
 
     cpu_local.initBsp() catch |err| {
-        serial.println("[KERNEL] CPU-local storage init failed: {s}", .{@errorName(err)});
+        serial.println("[KERNEL] CPU-local storage init failed: {s}", .{error_utils.errorToString(err)});
         serial.flush();
         @panic("Failed to initialize CPU-local storage");
     };
@@ -51,7 +53,7 @@ pub fn init() void {
         if (boot_info.rsdp_addr != 0) {
             serial.println("[KERNEL] Initializing ACPI subsystem...", .{});
             acpi.initSystem(allocator.kernel_allocator, boot_info.rsdp_addr) catch |err| {
-                serial.println("[KERNEL] ACPI init failed: {s}", .{@errorName(err)});
+                serial.println("[KERNEL] ACPI init failed: {s}", .{error_utils.errorToString(err)});
                 serial.println("[KERNEL] Continuing without ACPI support", .{});
                 serial.flush();
             };
@@ -71,7 +73,7 @@ pub fn init() void {
 
     // Initialize APIC if available
     apic.init() catch |err| {
-        serial.println("[KERNEL] APIC init failed: {s}", .{@errorName(err)});
+        serial.println("[KERNEL] APIC init failed: {s}", .{error_utils.errorToString(err)});
         serial.println("[KERNEL] Falling back to legacy PIC mode", .{});
         serial.flush();
     };
@@ -89,7 +91,7 @@ pub fn init() void {
 
         // Test APIC functionality
         apic.testAPIC() catch |err| {
-            serial.println("[KERNEL] APIC test failed: {s}", .{@errorName(err)});
+            serial.println("[KERNEL] APIC test failed: {s}", .{error_utils.errorToString(err)});
             serial.flush();
         };
     }
@@ -102,9 +104,40 @@ pub fn init() void {
     // Test per-CPU infrastructure
     serial.println("[KERNEL] Testing per-CPU infrastructure...", .{});
     smp_test.testPerCpuInfrastructure() catch |err| {
-        serial.println("[KERNEL] Per-CPU infrastructure test failed: {s}", .{@errorName(err)});
+        serial.println("[KERNEL] Per-CPU infrastructure test failed: {s}", .{error_utils.errorToString(err)});
         serial.flush();
     };
+
+    // Test AP debug functionality
+    serial.println("[KERNEL] Testing AP debug mechanism...", .{});
+    smp_test.testApDebug() catch |err| {
+        serial.println("[KERNEL] AP debug test failed: {s}", .{error_utils.errorToString(err)});
+        serial.flush();
+    };
+
+    serial.println("[KERNEL] AP debug test completed", .{});
+    serial.flush();
+
+    // Start Application Processors if we have ACPI topology information
+    serial.println("[KERNEL] Checking for ACPI system...", .{});
+    serial.flush();
+
+    if (acpi.getSystem()) |system| {
+        serial.println("[KERNEL] ACPI system found", .{});
+        serial.flush();
+        if (system.getTopology()) |topology| {
+            if (topology.total_cpus > 1) {
+                serial.println("[KERNEL] Starting Application Processors...", .{});
+                serial.flush();
+
+                ap_init.startAllAPs(topology.processors) catch |err| {
+                    serial.println("[KERNEL] Failed to start APs: {s}", .{error_utils.errorToString(err)});
+                    serial.flush();
+                    // Continue with single CPU operation
+                };
+            }
+        }
+    }
 }
 
 /// Prepare for interrupt enabling

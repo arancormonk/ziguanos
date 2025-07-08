@@ -3,11 +3,15 @@
 
 // Core serial driver implementation
 // This module provides the main driver logic with phase-aware initialization
+//
+// Thread-Safety: Buffer operations are protected by per-port spinlocks.
+// Hardware access is serialized through the HAL layer's global spinlock.
 
 const std = @import("std");
 const hal = @import("../hal/uart.zig");
 const regs = @import("../hal/registers.zig");
 const config = @import("config.zig");
+const spinlock = @import("../../../lib/spinlock.zig");
 
 /// Driver initialization phases
 pub const Phase = enum {
@@ -24,6 +28,7 @@ pub const SerialPort = struct {
     config: config.SerialConfig,
     initialized: bool,
     buffer: config.RingBuffer,
+    buffer_lock: spinlock.SpinLock,
 
     pub fn init(cfg: config.SerialConfig) SerialPort {
         return SerialPort{
@@ -31,6 +36,7 @@ pub const SerialPort = struct {
             .config = cfg,
             .initialized = false,
             .buffer = config.RingBuffer.init(),
+            .buffer_lock = spinlock.SpinLock{},
         };
     }
 
@@ -142,11 +148,18 @@ pub const Driver = struct {
             return;
         };
 
+        // Acquire spinlock for buffer access
+        var guard = spinlock.SpinLockGuard.init(&self.active_port.buffer_lock);
+        defer guard.deinit();
+
         // Try to buffer first
         const written = self.active_port.buffer.write(output);
         if (written < output.len) {
-            // Buffer full, flush and try direct write
+            // Buffer full, need to flush
+            // Release lock temporarily to avoid deadlock with flush
+            guard.deinit();
             self.flush();
+            // Direct write the remainder
             self.active_port.writeString(output[written..]);
         }
     }
@@ -155,8 +168,18 @@ pub const Driver = struct {
         if (self.phase == .uninitialized) return;
 
         var buffer: [256]u8 = undefined;
-        while (!self.active_port.buffer.isEmpty()) {
+        while (true) {
+            // Acquire lock for buffer operations
+            var guard = spinlock.SpinLockGuard.init(&self.active_port.buffer_lock);
+
+            if (self.active_port.buffer.isEmpty()) {
+                guard.deinit();
+                break;
+            }
+
             const bytes_read = self.active_port.buffer.read(&buffer);
+            guard.deinit(); // Release lock before I/O
+
             if (bytes_read == 0) break;
             self.active_port.writeString(buffer[0..bytes_read]);
         }

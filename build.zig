@@ -71,6 +71,7 @@ pub fn build(b: *std.Build) void {
     kernel.addAssemblyFile(b.path("kernel/src/boot/entry.S"));
     kernel.addAssemblyFile(b.path("kernel/src/x86_64/exception_stubs.S"));
     kernel.addAssemblyFile(b.path("kernel/src/x86_64/interrupt_stubs.S"));
+    kernel.addAssemblyFile(b.path("kernel/src/smp/trampoline.S"));
 
     // Add shared module
     kernel.root_module.addImport("shared", b.createModule(.{

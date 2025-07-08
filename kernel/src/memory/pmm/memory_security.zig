@@ -16,6 +16,13 @@ var zero_on_alloc: bool = true; // Enable memory zeroing by default
 pub fn zeroMemoryRange(addr: u64, size: u64) void {
     if (addr == 0 or size == 0) return;
 
+    // NEVER zero the AP trampoline area (0x5000-0x6000)
+    const TRAMPOLINE_START: u64 = 0x5000;
+    const TRAMPOLINE_END: u64 = 0x6000;
+    if (addr >= TRAMPOLINE_START and addr < TRAMPOLINE_END) {
+        return; // Silently skip zeroing protected memory
+    }
+
     const ptr = @as([*]u8, @ptrFromInt(addr));
     @memset(ptr[0..size], 0);
 
@@ -26,6 +33,13 @@ pub fn zeroMemoryRange(addr: u64, size: u64) void {
 // Poison a memory range with cryptographically secure random patterns
 pub fn poisonMemoryRange(addr: u64, size: u64) void {
     if (addr == 0 or size == 0) return;
+
+    // NEVER poison the AP trampoline area (0x5000-0x6000)
+    const TRAMPOLINE_START: u64 = 0x5000;
+    const TRAMPOLINE_END: u64 = 0x6000;
+    if (addr >= TRAMPOLINE_START and addr < TRAMPOLINE_END) {
+        return; // Silently skip poisoning protected memory
+    }
 
     var guard = stack_security.protect();
     defer guard.deinit();

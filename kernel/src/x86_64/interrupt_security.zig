@@ -97,6 +97,10 @@ var ist_stacks: [7]?u64 = [_]?u64{null} ** 7;
 var ist_depths: [7]std.atomic.Value(u16) = [_]std.atomic.Value(u16){std.atomic.Value(u16).init(0)} ** 7;
 const MAX_IST_DEPTH: u16 = 8; // Maximum nesting level
 
+// Per-CPU IST stacks (for SMP support)
+const MAX_CPUS = 256;
+var per_cpu_ist_stacks: [MAX_CPUS][7]?u64 = [_][7]?u64{[_]?u64{null} ** 7} ** MAX_CPUS;
+
 // Static IST stacks for early boot (before PMM)
 var static_ist_stacks: [7][IST.STACK_SIZE]u8 align(4096) = std.mem.zeroes([7][IST.STACK_SIZE]u8);
 var using_static_stacks: bool = true;
@@ -221,29 +225,17 @@ fn setupStaticISTStacks() void {
 
 // Allocate IST stacks with guard pages
 fn allocateISTStacks() !void {
-    var i: u8 = 0;
-    while (i < 7) : (i += 1) {
-        // Allocate stack pages
-        const stack_base = pmm.allocPagesTagged(IST.STACK_PAGES, .INTERRUPT_STACKS) orelse {
-            serial.println("[INT_SEC] ERROR: Failed to allocate IST stack", .{});
-            return error.OutOfMemory;
-        };
+    // BSP is CPU 0 - allocate its IST stacks
+    try allocateIstStacks(0);
 
-        // Zero the stack
-        const stack_ptr = @as([*]u8, @ptrFromInt(stack_base));
-        @memset(stack_ptr[0..IST.STACK_SIZE], 0);
-
-        // Stack grows down, so top is base + size
-        ist_stacks[i] = stack_base + IST.STACK_SIZE;
-
-        // Create guard page below stack
-        if (stack_base >= 4096) {
-            pmm.createGuardPage(stack_base - 4096) catch {};
-        }
+    // Get BSP IST stacks and update legacy ist_stacks array
+    const bsp_stacks = getIstStacks(0);
+    for (0..7) |i| {
+        ist_stacks[i] = @intFromPtr(bsp_stacks[i]);
     }
 
     using_static_stacks = false;
-    serial.println("[INT_SEC] Allocated 7 dynamic IST stacks with guard pages", .{});
+    serial.println("[INT_SEC] Allocated dynamic IST stacks for BSP", .{});
 }
 
 // Update TSS with IST entries
@@ -505,6 +497,58 @@ pub fn printStatistics() void {
 }
 
 // Validate interrupt context integrity with enhanced security checks
+/// Allocate IST stacks for a specific CPU (for SMP support)
+pub fn allocateIstStacks(cpu_id: u32) !void {
+    var guard = stack_security.protect();
+    defer guard.deinit();
+
+    if (cpu_id >= MAX_CPUS) {
+        return error.InvalidCpuId;
+    }
+
+    // Allocate each IST stack with guard pages
+    for (0..7) |i| {
+        // Allocate IST stack pages + 1 guard page on each side
+        const total_pages = IST.STACK_PAGES + 2;
+        const stack_phys = pmm.allocPagesTagged(total_pages, .SECURITY) orelse {
+            // Cleanup previously allocated stacks on failure
+            for (0..i) |j| {
+                if (per_cpu_ist_stacks[cpu_id][j]) |addr| {
+                    pmm.freePages(addr - 4096, IST.STACK_PAGES + 2);
+                    per_cpu_ist_stacks[cpu_id][j] = null;
+                }
+            }
+            return error.OutOfMemory;
+        };
+
+        // Skip first page (guard page), use middle pages for stack
+        const stack_addr = stack_phys + 4096 + IST.STACK_SIZE;
+        per_cpu_ist_stacks[cpu_id][i] = stack_addr;
+
+        serial.println("[IST] CPU {} IST{} allocated at 0x{x}", .{ cpu_id, i + 1, stack_addr });
+    }
+}
+
+/// Get IST stacks for a specific CPU
+pub fn getIstStacks(cpu_id: u32) [7][*]u8 {
+    var result: [7][*]u8 = undefined;
+
+    if (cpu_id >= MAX_CPUS) {
+        // Return BSP stacks as fallback
+        for (0..7) |i| {
+            result[i] = if (ist_stacks[i]) |addr| @ptrFromInt(addr) else undefined;
+        }
+        return result;
+    }
+
+    // Return per-CPU IST stacks
+    for (0..7) |i| {
+        result[i] = if (per_cpu_ist_stacks[cpu_id][i]) |addr| @ptrFromInt(addr) else undefined;
+    }
+
+    return result;
+}
+
 pub fn validateContext(context: *const InterruptContext) bool {
     var guard = stack_security.protect();
     defer guard.deinit();

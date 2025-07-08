@@ -29,6 +29,10 @@ const MEMORY_BITMAP_SIZE: usize = 65536; // Support up to 16GB of RAM
 const PMM_RESERVED_BASE: u64 = 0x100000; // Reserve first 1MB
 const MAX_MEMORY: u64 = 0x400000000; // 16GB max
 
+// Protected memory ranges that should never be freed or poisoned
+const TRAMPOLINE_START: u64 = 0x5000;
+const TRAMPOLINE_END: u64 = 0x6000;
+
 // Get kernel base dynamically from runtime info
 fn getKernelBase() u64 {
     const info = runtime_info.getRuntimeInfo();
@@ -169,6 +173,14 @@ pub fn init(boot_info: *const uefi_boot.UEFIBootInfo) void {
     const bitmap_pages = (MEMORY_BITMAP_SIZE * 8 + PAGE_SIZE - 1) / PAGE_SIZE;
     markPagesAsUsedInitial(bitmap_start, bitmap_pages);
     reserved_pages += bitmap_pages;
+
+    // Reserve low memory area for AP trampoline (0x5000-0x6000)
+    // This is critical for SMP initialization
+    const trampoline_start = 0x5000 / PAGE_SIZE;
+    const trampoline_pages = 1; // One 4KB page
+    markPagesAsUsedInitial(trampoline_start, trampoline_pages);
+    reserved_pages += trampoline_pages;
+    serial.print("[PMM] Reserved AP trampoline area at 0x5000\n", .{});
 
     // Enable guard pages around critical regions
     guard_pages.setupGuardPages(boot_info, markPagesAsUsed, &reserved_pages, total_pages);
@@ -437,6 +449,12 @@ pub fn freePages(addr: u64, num_pages: u64) void {
     if (addr < PMM_RESERVED_BASE or (addr % PAGE_SIZE) != 0) {
         serial.printAddress("[PMM] WARNING: Invalid free address", addr);
         stats.recordGuardPageViolation();
+        return;
+    }
+
+    // Check if this is the trampoline area - NEVER free or poison it
+    if (addr >= TRAMPOLINE_START and addr < TRAMPOLINE_END) {
+        serial.printAddress("[PMM] SECURITY: Blocked attempt to free protected trampoline memory at", addr);
         return;
     }
 

@@ -1,3 +1,6 @@
+// Copyright 2025 arancormonk
+// SPDX-License-Identifier: MIT
+
 const std = @import("std");
 const per_cpu = @import("per_cpu.zig");
 const heap = @import("../memory/heap.zig");

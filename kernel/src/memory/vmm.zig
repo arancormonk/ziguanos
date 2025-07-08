@@ -275,7 +275,12 @@ pub fn init() !void {
     serial.println("[VMM] Heap region: 0x{x:0>16} - 0x{x:0>16}", .{ heap_start, heap_end });
 
     // Phase 2: Pre-allocate and map initial heap pages
-    const initial_pages = 4; // 16KB initial heap (reduced for debugging)
+    // For SMP support, we need more heap:
+    // - 64KB per AP stack
+    // - 112KB per AP for IST stacks (7 * 16KB)
+    // - Additional space for other allocations
+    // For 4 CPUs: ~704KB minimum, let's allocate 1MB
+    const initial_pages = 256; // 1MB initial heap for SMP support
     serial.println("[VMM] Pre-allocating {} pages for heap", .{initial_pages});
 
     var i: usize = 0;

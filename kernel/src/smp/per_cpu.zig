@@ -1,7 +1,11 @@
+// Copyright 2025 arancormonk
+// SPDX-License-Identifier: MIT
+
 const std = @import("std");
 const cpu_init = @import("../x86_64/cpu_init.zig");
 const heap = @import("../memory/heap.zig");
 const spinlock = @import("../lib/spinlock.zig");
+const madt = @import("../drivers/acpi/madt.zig");
 
 /// Per-CPU data structure containing all CPU-specific information
 pub const CpuData = struct {
@@ -29,6 +33,9 @@ pub const CpuData = struct {
 
 /// Maximum number of CPUs supported
 pub const MAX_CPUS = 256;
+
+/// Re-export ProcessorInfo from MADT for convenience
+pub const ProcessorInfo = madt.ProcessorInfo;
 
 /// Magic value for CPU data validation
 const CPU_DATA_MAGIC: u64 = 0xDEADBEEFCAFEBABE;

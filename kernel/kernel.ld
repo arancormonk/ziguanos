@@ -37,9 +37,25 @@ SECTIONS
     . = ALIGN(4096);
     __data_start = .;
 
+    /* SMP trampoline code - must be kept together in its own section */
+    .trampoline ALIGN(4096) : {
+        *(.data.trampoline)
+    }
+    
     /* Initialized data */
     .data ALIGN(4096) : {
-        *(.data .data.*)
+        /* Exclude trampoline section */
+        *(.data)
+        *(.data.[!t]*)
+        *(.data.t[!r]*)
+        *(.data.tr[!a]*)
+        *(.data.tra[!m]*)
+        *(.data.tram[!p]*)
+        *(.data.tramp[!o]*)
+        *(.data.trampo[!l]*)
+        *(.data.trampol[!i]*)
+        *(.data.trampoli[!n]*)
+        *(.data.trampolin[!e]*)
         *(.gnu.linkonce.d*)
         
         /* Constructor/destructor arrays for C++ support */

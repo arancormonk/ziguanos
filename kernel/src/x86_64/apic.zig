@@ -403,6 +403,78 @@ pub fn sendEOI() void {
     writeRegister(APIC_EOI, 0);
 }
 
+// IPI delivery modes
+pub const IpiDeliveryMode = enum(u3) {
+    Fixed = 0,
+    LowestPriority = 1,
+    SMI = 2,
+    Reserved = 3,
+    NMI = 4,
+    Init = 5,
+    Startup = 6,
+    ExtINT = 7,
+};
+
+// IPI destination shorthand
+pub const IpiDestShorthand = enum(u2) {
+    NoShorthand = 0,
+    Self = 1,
+    AllIncludingSelf = 2,
+    AllExcludingSelf = 3,
+};
+
+// IPI level
+pub const IpiLevel = enum(u1) {
+    Deassert = 0,
+    Assert = 1,
+};
+
+// IPI trigger mode
+pub const IpiTriggerMode = enum(u1) {
+    Edge = 0,
+    Level = 1,
+};
+
+// Send Inter-Processor Interrupt
+pub fn sendIPI(dest_apic_id: u8, vector: u8, delivery_mode: IpiDeliveryMode, level: IpiLevel, trigger_mode: IpiTriggerMode, dest_shorthand: IpiDestShorthand) !void {
+    var guard = stack_security.protect();
+    defer guard.deinit();
+
+    if (!isAvailable()) {
+        return error.APICNotAvailable;
+    }
+
+    // Build ICR value
+    var icr_low: u32 = 0;
+    icr_low |= @as(u32, vector); // Vector (bits 0-7)
+    icr_low |= @as(u32, @intFromEnum(delivery_mode)) << 8; // Delivery mode (bits 8-10)
+    icr_low |= @as(u32, @intFromEnum(level)) << 14; // Level (bit 14)
+    icr_low |= @as(u32, @intFromEnum(trigger_mode)) << 15; // Trigger mode (bit 15)
+    icr_low |= @as(u32, @intFromEnum(dest_shorthand)) << 18; // Destination shorthand (bits 18-19)
+
+    // For physical destination mode (we don't use logical mode)
+    // Destination mode = 0 (physical) is bit 11, already 0
+
+    // Wait for any previous IPI to complete
+    var retries: u32 = 0;
+    while ((readRegister(APIC_ICR_LOW) & (1 << 12)) != 0) {
+        asm volatile ("pause");
+        retries += 1;
+        if (retries > 1000000) {
+            return error.IPIBusy;
+        }
+    }
+
+    // Write destination (high 32 bits) if not using shorthand
+    if (dest_shorthand == .NoShorthand) {
+        const icr_high = @as(u32, dest_apic_id) << 24;
+        writeRegister(APIC_ICR_HIGH, icr_high);
+    }
+
+    // Write command (low 32 bits) - this sends the IPI
+    writeRegister(APIC_ICR_LOW, icr_low);
+}
+
 // Mask all interrupts except timer
 pub fn maskAllInterrupts() void {
     // Mask thermal sensor interrupts
@@ -488,34 +560,6 @@ pub fn setTimerInitialCount(count: u32) void {
 // Get APIC timer current count
 pub fn getTimerCurrentCount() u32 {
     return readRegister(APIC_TIMER_CURRENT);
-}
-
-// Send Inter-Processor Interrupt
-pub fn sendIPI(dest_apic_id: u8, vector: u8, delivery_mode: u32) !void {
-    var guard = stack_security.protect();
-    defer guard.deinit();
-
-    // Security: Validate vector number
-    if (vector < 32) {
-        return error.InvalidVector; // Vectors 0-31 are reserved for exceptions
-    }
-
-    // Wait for any pending IPI to complete
-    var timeout: u32 = 1000000;
-    while ((readRegister(APIC_ICR_LOW) & (1 << 12)) != 0 and timeout > 0) : (timeout -= 1) {
-        asm volatile ("pause");
-    }
-
-    if (timeout == 0) {
-        return error.IPITimeout;
-    }
-
-    // Write destination
-    writeRegister(APIC_ICR_HIGH, @as(u32, dest_apic_id) << 24);
-
-    // Write command with vector and delivery mode
-    const icr_low = @as(u32, vector) | delivery_mode | APIC_ICR_DEST_PHYSICAL | APIC_ICR_LEVEL_ASSERT;
-    writeRegister(APIC_ICR_LOW, icr_low);
 }
 
 // Broadcast IPI to all CPUs
