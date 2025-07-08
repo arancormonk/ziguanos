@@ -18,9 +18,12 @@ ap_trampoline_start:
 .code16
 ap_rm_entry:
     # First thing: write a marker to show we're executing
-    # Write 0xDEAD to address 0x9FE0 immediately
+    # Write 0xDEAD to address 0x9FE0 using direct addressing
     mov $0xDEAD, %ax
-    mov %ax, %cs:0x4FE0   # CS-relative write to 0x5000 + 0x4FE0 = 0x9FE0
+    mov %ax, 0x9FE0
+    
+    # Don't write to VGA memory - it may not be mapped and can cause issues
+    # Just continue with initialization
     
     cli
     
@@ -36,28 +39,37 @@ ap_rm_entry:
     # Write debug info: RealMode16 stage (1)
     # Debug structure at 0x9000: magic(4), cpu_id(4), stage(1), error(1), pad(6), value(8)
     movl $0x12345678, 0x9000       # Magic
-    movl (ap_cpu_id - ap_trampoline_start + 0x7000), %eax
+    movl (ap_cpu_id - ap_trampoline_start + 0x5000), %eax
     movl %eax, 0x9004              # CPU ID
     movb $1, 0x9008                # Stage = RealMode16
     movb $0, 0x9009                # Error = 0
     
     # Load GDT pointer using absolute addressing
-    # GDT descriptor will be placed at 0x7000 + ap_gdtr offset
-    lgdt (ap_gdtr - ap_trampoline_start + 0x7000)
+    # GDT descriptor will be placed at 0x5000 + ap_gdtr offset
+    lgdt (ap_gdtr - ap_trampoline_start + 0x5000)
+    
+    # Write marker to show we passed lgdt
+    movw $0x1111, 0x9FFC
     
     # Enable protected mode
     mov %cr0, %eax
     or $1, %eax
     mov %eax, %cr0
     
+    # Write marker to show we enabled protected mode
+    movw $0x2222, 0x9FFA
+    
     # Far jump to 32-bit protected mode
-    # CS = 0x08 (code segment), EIP = 32-bit entry relative to 0x7000
-    ljmp $0x08, $(ap_pm_entry - ap_trampoline_start + 0x7000)
+    # CS = 0x08 (code segment), EIP = 32-bit entry relative to 0x5000
+    ljmp $0x08, $(ap_pm_entry - ap_trampoline_start + 0x5000)
 
 # Protected mode code (32-bit)
 .code32
 .align 16
 ap_pm_entry:
+    # Write marker to show we reached 32-bit mode
+    movl $0x3333, 0x9FF8
+    
     # Setup segments
     mov $0x10, %ax      # Data segment selector
     mov %ax, %ds
@@ -68,14 +80,14 @@ ap_pm_entry:
     
     # Write debug info: ProtectedMode32 stage (2)
     movl $0x12345678, 0x9000       # Magic
-    movl (ap_cpu_id - ap_trampoline_start + 0x7000), %eax
+    movl (ap_cpu_id - ap_trampoline_start + 0x5000), %eax
     movl %eax, 0x9004              # CPU ID
     movb $2, 0x9008                # Stage = ProtectedMode32
     movb $0, 0x9009                # Error = 0
     
     # Load page table base into CR3
     # The BSP will write the PML4 address to ap_pml4_addr
-    mov (ap_pml4_addr - ap_trampoline_start + 0x7000), %eax
+    mov (ap_pml4_addr - ap_trampoline_start + 0x5000), %eax
     mov %eax, %cr3
     
     # Enable PAE
@@ -96,7 +108,7 @@ ap_pm_entry:
     
     # Far jump to 64-bit long mode
     # Use 64-bit code segment selector (0x18)
-    ljmp $0x18, $(ap_lm_entry - ap_trampoline_start + 0x7000)
+    ljmp $0x18, $(ap_lm_entry - ap_trampoline_start + 0x5000)
 
 # Long mode code (64-bit)
 .code64
@@ -112,19 +124,19 @@ ap_lm_entry:
     
     # Write debug info: LongMode64 stage (3)
     movl $0x12345678, 0x9000       # Magic
-    movl (ap_cpu_id - ap_trampoline_start + 0x7000), %eax
+    movl (ap_cpu_id - ap_trampoline_start + 0x5000), %eax
     movl %eax, 0x9004              # CPU ID
     movb $3, 0x9008                # Stage = LongMode64
     movb $0, 0x9009                # Error = 0
     
     # Get CPU ID from startup data
-    movl (ap_cpu_id - ap_trampoline_start + 0x7000), %edi
+    movl (ap_cpu_id - ap_trampoline_start + 0x5000), %edi
     
     # Load stack pointer for this CPU
     # Stack addresses are stored in an array starting at ap_stack_array
     mov %edi, %eax
     shl $3, %eax       # Multiply by 8 (size of pointer)
-    lea (ap_stack_array - ap_trampoline_start + 0x7000), %rbx
+    lea (ap_stack_array - ap_trampoline_start + 0x5000), %rbx
     mov (%rbx,%rax), %rsp
     
     # Store stack pointer as debug value
@@ -135,7 +147,7 @@ ap_lm_entry:
     
     # Jump to kernel's AP entry point with CPU ID in RDI
     # The address is relocated and stored by BSP
-    mov (ap_entry_point - ap_trampoline_start + 0x7000), %rax
+    mov (ap_entry_point - ap_trampoline_start + 0x5000), %rax
     jmp *%rax
 
 # Data section for trampoline
@@ -156,7 +168,7 @@ ap_gdt_end:
 .align 16
 ap_gdtr:
     .word ap_gdt_end - ap_gdt - 1  # Limit
-    .long ap_gdt - ap_trampoline_start + 0x7000  # Base (physical address)
+    .long ap_gdt - ap_trampoline_start + 0x5000  # Base (physical address)
 
 # Variables populated by BSP
 .align 8

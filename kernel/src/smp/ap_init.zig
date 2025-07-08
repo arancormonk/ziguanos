@@ -126,7 +126,7 @@ pub fn initAP(cpu_id: u32, apic_id: u8) !void {
 
     // Update trampoline data for this CPU
     serial.println("[SMP] Updating trampoline data for CPU {}...", .{cpu_id});
-    updateTrampolineData(cpu_id, stack_top, cpu_data);
+    const ap_startup_data_offset = updateTrampolineData(cpu_id, stack_top, cpu_data);
 
     // Verify trampoline integrity before sending IPI
     const verify_ptr = @as([*]const u8, @ptrFromInt(TRAMPOLINE_ADDR));
@@ -144,28 +144,28 @@ pub fn initAP(cpu_id: u32, apic_id: u8) !void {
 
     // Add a debug dump of the critical trampoline values before sending IPI
     serial.println("[SMP] Dumping critical trampoline data before INIT-SIPI-SIPI:", .{});
-    const dump_base = TRAMPOLINE_ADDR + 0x120; // Where we found the GDT
+    const dump_base = TRAMPOLINE_ADDR + ap_startup_data_offset;
     const dump_ptr = @as([*]const u8, @ptrFromInt(dump_base));
     serial.print("[SMP]   GDT[0]: ", .{});
     for (0..8) |i| {
         serial.print("{x:0>2} ", .{dump_ptr[i]});
     }
     serial.println("", .{});
-    serial.print("[SMP]   GDTR @ +0x30: ", .{});
-    for (0x30..0x36) |i| {
-        serial.print("{x:0>2} ", .{dump_ptr[i]});
+    serial.print("[SMP]   GDTR @ +0x{x}: ", .{TrampolineOffsets.gdtr_offset});
+    const gdtr_ptr = dump_ptr + TrampolineOffsets.gdtr_offset;
+    for (0..6) |i| {
+        serial.print("{x:0>2} ", .{gdtr_ptr[i]});
     }
     serial.println("", .{});
-    serial.print("[SMP]   PML4 @ +0x38: ", .{});
-    for (0x38..0x3C) |i| {
-        serial.print("{x:0>2} ", .{dump_ptr[i]});
-    }
-    serial.println("", .{});
-    serial.print("[SMP]   Entry @ +0x40: ", .{});
-    for (0x40..0x48) |i| {
-        serial.print("{x:0>2} ", .{dump_ptr[i]});
-    }
-    serial.println("", .{});
+    serial.print("[SMP]   PML4 @ +0x{x}: ", .{TrampolineOffsets.pml4_addr_offset});
+    const pml4_ptr = @as(*const u32, @ptrFromInt(@intFromPtr(dump_ptr) + TrampolineOffsets.pml4_addr_offset));
+    serial.println("0x{x}", .{pml4_ptr.*});
+    serial.print("[SMP]   Entry @ +0x{x}: ", .{TrampolineOffsets.entry_point_offset});
+    const entry_ptr = @as(*const u64, @ptrFromInt(@intFromPtr(dump_ptr) + TrampolineOffsets.entry_point_offset));
+    serial.println("0x{x}", .{entry_ptr.*});
+    serial.print("[SMP]   CPU ID @ +0x{x}: ", .{TrampolineOffsets.cpu_id_offset});
+    const cpuid_ptr = @as(*const u32, @ptrFromInt(@intFromPtr(dump_ptr) + TrampolineOffsets.cpu_id_offset));
+    serial.println("{}", .{cpuid_ptr.*});
 
     // Send INIT-SIPI-SIPI sequence
     serial.println("[SMP] Sending INIT-SIPI-SIPI to APIC ID {}...", .{apic_id});
@@ -254,6 +254,16 @@ fn setupTrampoline() !void {
 
     // Check if the memory has a suspicious pattern before setup
     checkMemoryPattern(TRAMPOLINE_ADDR, 256);
+
+    // Also verify this memory is accessible
+    const test_ptr = @as(*volatile u8, @ptrFromInt(TRAMPOLINE_ADDR));
+    const original_value = test_ptr.*;
+    test_ptr.* = 0xAA;
+    if (test_ptr.* != 0xAA) {
+        serial.println("[SMP] ERROR: Cannot write to trampoline memory at 0x{x}!", .{TRAMPOLINE_ADDR});
+        return error.TrampolineMemoryNotWritable;
+    }
+    test_ptr.* = original_value; // Restore original value
 
     // Check if already setup
     const trampoline_ptr = @as([*]const u8, @ptrFromInt(TRAMPOLINE_ADDR));
@@ -442,7 +452,7 @@ fn findStartupDataOffset() usize {
 }
 
 /// Update trampoline data for specific CPU
-fn updateTrampolineData(cpu_id: u32, stack_top: [*]u8, cpu_data: *per_cpu.CpuData) void {
+fn updateTrampolineData(cpu_id: u32, stack_top: [*]u8, cpu_data: *per_cpu.CpuData) usize {
     // Find the actual offset of ap_startup_data
     const ap_startup_data_offset = findStartupDataOffset();
 
@@ -524,6 +534,8 @@ fn updateTrampolineData(cpu_id: u32, stack_top: [*]u8, cpu_data: *per_cpu.CpuDat
 
     // Ensure all writes are visible
     asm volatile ("mfence" ::: "memory");
+
+    return ap_startup_data_offset;
 }
 
 /// Simple busy wait for AP startup (doesn't require interrupts or TSC)
@@ -544,8 +556,12 @@ fn timerWait(ms: u64) void {
 
 /// Send INIT-SIPI-SIPI sequence to start AP
 fn sendInitSipiSipi(apic_id: u8) !void {
+    // Disable interrupts for the entire sequence
+    asm volatile ("cli" ::: "memory");
+    defer asm volatile ("sti" ::: "memory");
+
     // Clear debug marker locations before starting
-    // Important: Don't clear the trampoline area (0x7000), only debug areas
+    // Important: Don't clear the trampoline area (0x5000), only debug areas
     @as(*volatile u16, @ptrFromInt(0x9FE0)).* = 0;
     @as(*volatile u16, @ptrFromInt(0x9FF0)).* = 0;
     @as(*volatile u32, @ptrFromInt(0x9000)).* = 0; // Clear magic
@@ -574,6 +590,20 @@ fn sendInitSipiSipi(apic_id: u8) !void {
     serial.println("[SMP] Waiting 10ms...", .{});
     busyWait(1_000_000); // Reduced from 10M to 1M for faster iteration
 
+    // Check ICR status after INIT
+    const icr_after_init = apic.readRegister(0x300); // APIC_ICR_LOW
+    serial.println("[SMP] ICR after INIT wait: 0x{x}", .{icr_after_init});
+
+    // Wait for delivery status to clear
+    var wait_count: u32 = 0;
+    while ((apic.readRegister(0x300) & (1 << 12)) != 0 and wait_count < 1000) {
+        busyWait(1000);
+        wait_count += 1;
+    }
+    if (wait_count > 0) {
+        serial.println("[SMP] Waited {} iterations for INIT delivery status to clear", .{wait_count});
+    }
+
     // Dump memory to check if it's been overwritten during INIT
     serial.print("[SMP] Trampoline after INIT: ", .{});
     const init_check = @as([*]const u8, @ptrFromInt(TRAMPOLINE_ADDR));
@@ -587,6 +617,13 @@ fn sendInitSipiSipi(apic_id: u8) !void {
     if (check_ptr[0] != 0xB8 or check_ptr[1] != 0xAD or check_ptr[2] != 0xDE) {
         serial.println("[SMP] WARNING: Trampoline corrupted after INIT! First bytes: 0x{x} 0x{x} 0x{x}", .{ check_ptr[0], check_ptr[1], check_ptr[2] });
     }
+
+    // Check interrupt flag status
+    const flags = asm volatile ("pushfq; popq %[flags]"
+        : [flags] "=r" (-> u64),
+    );
+    const if_enabled = (flags & 0x200) != 0; // IF is bit 9
+    serial.println("[SMP] Interrupt flag status before SIPI: {} (flags=0x{x})", .{ if_enabled, flags });
 
     // Send first SIPI with vector 0x05 (0x5000 >> 12)
     // SIPI vector is the page number (address >> 12), so 0x05 = 0x5000
@@ -622,8 +659,14 @@ fn sendInitSipiSipi(apic_id: u8) !void {
     // Check for simple markers
     const early_marker_ptr = @as(*volatile u16, @ptrFromInt(0x9FE0));
     const marker_ptr = @as(*volatile u16, @ptrFromInt(0x9FF0));
+    const lgdt_marker = @as(*volatile u16, @ptrFromInt(0x9FFC));
+    const cr0_marker = @as(*volatile u16, @ptrFromInt(0x9FFA));
+    const pm_marker = @as(*volatile u32, @ptrFromInt(0x9FF8));
     serial.println("[SMP]   Early marker at 0x9FE0: 0x{x} (should be 0xDEAD if AP executed)", .{early_marker_ptr.*});
     serial.println("[SMP]   Marker at 0x9FF0: 0x{x} (should be 0xBEEF if AP started)", .{marker_ptr.*});
+    serial.println("[SMP]   Post-lgdt marker at 0x9FFC: 0x{x} (should be 0x1111 if lgdt succeeded)", .{lgdt_marker.*});
+    serial.println("[SMP]   Post-CR0 marker at 0x9FFA: 0x{x} (should be 0x2222 if CR0 modified)", .{cr0_marker.*});
+    serial.println("[SMP]   PM entry marker at 0x9FF8: 0x{x} (should be 0x3333 if reached 32-bit mode)", .{pm_marker.*});
 
     // Also dump the first part of the trampoline to verify it looks correct
     serial.println("[SMP] Trampoline first 64 bytes:", .{});

@@ -1450,3 +1450,55 @@ pub fn updatePageFlags(virt_addr: u64, new_flags: u64) !void {
     asm volatile ("mfence" ::: "memory");
     invalidatePage(virt_addr);
 }
+
+/// Map a memory-mapped I/O (MMIO) region as uncacheable
+/// This is critical for device registers like APIC, where caching can cause incorrect behavior
+pub fn mapMMIORegion(virt_addr: u64, phys_addr: u64, size: usize) !void {
+    var guard = stack_security.protect();
+    defer guard.deinit();
+
+    // Ensure addresses and size are page-aligned
+    if ((virt_addr & (PAGE_SIZE_4K - 1)) != 0 or (phys_addr & (PAGE_SIZE_4K - 1)) != 0) {
+        return error.UnalignedAddress;
+    }
+
+    const page_count = (size + PAGE_SIZE_4K - 1) / PAGE_SIZE_4K;
+
+    serial.println("[PAGING] Mapping MMIO region: virt=0x{x}, phys=0x{x}, size=0x{x} ({} pages)", .{ virt_addr, phys_addr, size, page_count });
+
+    // Map each page with uncacheable flags
+    var offset: usize = 0;
+    while (offset < size) : (offset += PAGE_SIZE_4K) {
+        const current_virt = virt_addr + offset;
+        const current_phys = phys_addr + offset;
+
+        // Use cache-disable and write-through for MMIO regions
+        // This ensures all reads/writes go directly to the device
+        const mmio_flags = PAGE_PRESENT | PAGE_WRITABLE | PAGE_NO_EXECUTE |
+            PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH;
+
+        // Try to map the page - if it already exists, update its flags
+        mapPage(current_virt, current_phys, mmio_flags) catch |err| {
+            if (err == error.PageTableNotPresent) {
+                // Page table doesn't exist, this is more complex
+                // For now, we assume early boot has set up necessary page tables
+                serial.println("[PAGING] WARNING: Page table not present for MMIO mapping at 0x{x}", .{current_virt});
+                return err;
+            } else if (err == error.PageSizeConflict) {
+                // There's a large page here, we need to split it
+                // For now, just update the flags if the mapping already exists
+                updatePageFlags(current_virt, mmio_flags) catch |update_err| {
+                    serial.println("[PAGING] Failed to update MMIO flags at 0x{x}: {}", .{ current_virt, update_err });
+                    return update_err;
+                };
+            } else {
+                return err;
+            }
+        };
+    }
+
+    // Ensure all CPUs see the mapping changes
+    asm volatile ("mfence" ::: "memory");
+
+    serial.println("[PAGING] MMIO region mapped successfully", .{});
+}

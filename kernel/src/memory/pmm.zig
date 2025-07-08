@@ -182,6 +182,14 @@ pub fn init(boot_info: *const uefi_boot.UEFIBootInfo) void {
     reserved_pages += trampoline_pages;
     serial.print("[PMM] Reserved AP trampoline area at 0x5000\n", .{});
 
+    // Reserve debug area for AP startup (0x9000-0xA000)
+    // The trampoline writes debug information here during startup
+    const debug_start = 0x9000 / PAGE_SIZE;
+    const debug_pages = 1; // One 4KB page
+    markPagesAsUsedInitial(debug_start, debug_pages);
+    reserved_pages += debug_pages;
+    serial.print("[PMM] Reserved AP debug area at 0x9000\n", .{});
+
     // Enable guard pages around critical regions
     guard_pages.setupGuardPages(boot_info, markPagesAsUsed, &reserved_pages, total_pages);
 
