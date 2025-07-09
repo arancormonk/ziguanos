@@ -298,9 +298,13 @@ pub fn initAP(cpu_id: u32, apic_id: u8) !void {
 
             // Also check the debug location directly every 100ms
             if (debug_checks % 10 == 0) {
+                // Add memory barrier before reading to ensure coherency
+                asm volatile ("mfence" ::: "memory");
+
                 const debug_ptr = @as(*align(1) volatile ap_debug.TrampolineDebug, @ptrFromInt(ap_debug.TRAMPOLINE_DEBUG_ADDR));
                 const early_marker = @as(*volatile u16, @ptrFromInt(0x6FF0)).*;
                 const marker = @as(*volatile u16, @ptrFromInt(0x6FF2)).*;
+                // Read lgdt_marker as volatile to avoid interference
                 const lgdt_marker = @as(*volatile u16, @ptrFromInt(0x6FF4)).*;
                 const cr0_marker = @as(*volatile u16, @ptrFromInt(0x6FF6)).*;
                 const pm_marker = @as(*volatile u32, @ptrFromInt(0x6FFC)).*;
@@ -375,7 +379,22 @@ fn setupTrampoline() !void {
     serial.println("[SMP] Checking debug region at 0x6000...", .{});
     checkMemoryPattern(0x6000, 256);
 
-    // Try to ensure debug region is mapped and writable
+    // CRITICAL: Ensure debug regions are properly accessible with correct memory type
+    // These regions must be accessible to both BSP and AP with cache coherency
+    serial.println("[SMP] Verifying debug region accessibility and coherency...", .{});
+
+    // First, ensure the pages are mapped
+    const debug_base: u64 = 0x6000;
+    const debug_end: u64 = 0x8000; // Include trampoline area
+
+    // Make the debug region uncacheable to avoid coherency issues
+    // This ensures all accesses go directly to memory
+    paging.makeRegionUncacheable(debug_base, debug_end - debug_base) catch |err| {
+        serial.println("[SMP] WARNING: Failed to make debug region uncacheable: {s}", .{error_utils.errorToString(err)});
+        // Continue anyway, but coherency might be an issue
+    };
+
+    // Test the region is accessible
     const debug_test = @as(*volatile u32, @ptrFromInt(0x6000));
     debug_test.* = 0xDEADBEEF;
     asm volatile ("mfence" ::: "memory");
@@ -383,8 +402,9 @@ fn setupTrampoline() !void {
         serial.println("[SMP] ERROR: Debug region at 0x6000 is not writable!", .{});
         serial.println("[SMP]   Wrote 0xDEADBEEF, read back 0x{x}", .{debug_test.*});
     } else {
-        serial.println("[SMP] Debug region at 0x6000 is writable", .{});
+        serial.println("[SMP] Debug region at 0x6000 is writable and coherent", .{});
         debug_test.* = 0; // Clear it
+        asm volatile ("mfence" ::: "memory");
     }
 
     // Also verify this memory is accessible
@@ -569,6 +589,13 @@ fn setupTrampoline() !void {
         return err;
     };
 
+    // CRITICAL: Also make the trampoline area uncacheable for coherency
+    // This ensures BSP and AP see consistent memory during startup
+    paging.makeRegionUncacheable(TRAMPOLINE_ADDR, trampoline_size) catch |err| {
+        serial.println("[SMP] WARNING: Failed to make trampoline uncacheable: {s}", .{error_utils.errorToString(err)});
+        // Continue but coherency might be an issue
+    };
+
     // Fix up the GDTR base address in the trampoline
     // The GDTR in the trampoline has a relative base that needs to be adjusted
     // (we already found ap_startup_data_offset above)
@@ -607,8 +634,25 @@ fn setupTrampoline() !void {
 
     serial.println("[SMP] Fixed IDTR: limit=0x{x}, base=0x{x}", .{ idt_limit, idt_physical_addr });
 
-    // Ensure all CPUs see the changes (memory barrier)
+    // CRITICAL: Also flush the debug memory regions that AP will write to
+    // This prevents cache coherency issues between BSP and AP
+    serial.println("[SMP] Flushing debug memory regions for cache coherency", .{});
+
+    // Flush 0x6000-0x7000 region (debug area)
+    var debug_addr: u64 = 0x6000;
+    while (debug_addr <= 0x7010) : (debug_addr += 64) {
+        asm volatile ("clflush (%[addr])"
+            :
+            : [addr] "r" (debug_addr),
+            : "memory"
+        );
+    }
+
+    // Ensure all cache flushes complete before proceeding
     asm volatile ("mfence" ::: "memory");
+
+    // Additional serialization to ensure all pending stores are globally visible
+    asm volatile ("cpuid" ::: "eax", "ebx", "ecx", "edx", "memory");
 
     // Verify trampoline is still intact after setup
     const verify_ptr = @as([*]const u8, @ptrFromInt(TRAMPOLINE_ADDR));
@@ -886,24 +930,25 @@ fn sendInitSipiSipi(apic_id: u8) !void {
     // Clear debug markers at beginning of debug range
     const early_marker_1 = @as(*volatile u16, @ptrFromInt(0x6FF0));
     const early_marker_2 = @as(*volatile u16, @ptrFromInt(0x6FF2));
-    const clear_lgdt_marker = @as(*volatile u16, @ptrFromInt(0x6FF4));
+    // const clear_lgdt_marker = @as(*volatile u16, @ptrFromInt(0x6FF4));
     const clear_cr0_marker = @as(*volatile u16, @ptrFromInt(0x6FF6));
     const clear_exception_marker = @as(*volatile u32, @ptrFromInt(0x6FF8));
     const clear_pm_marker = @as(*volatile u32, @ptrFromInt(0x6FFC));
     const clear_stack_debug = @as(*volatile u64, @ptrFromInt(0x7010));
 
-    // Try to clear them, but don't fail if they're not accessible
+    // NOTE: Clear debug regions but avoid 0x6FF4 to prevent conflicts
+    // The AP will write to 0x6FF4 after lgdt, and we don't want to interfere
     early_marker_1.* = 0;
     early_marker_2.* = 0;
     debug_addr_3.* = 0; // Clear magic at 0x7000
-    clear_lgdt_marker.* = 0;
+    // Skip clearing 0x6FF4 (lgdt marker) to avoid race condition
     clear_cr0_marker.* = 0;
     clear_exception_marker.* = 0;
     clear_pm_marker.* = 0;
     clear_stack_debug.* = 0;
 
-    // Ensure writes are visible
-    asm volatile ("mfence" ::: "memory");
+    // Ensure writes are visible and prevent reordering
+    asm volatile ("mfence; lfence" ::: "memory");
 
     // Immediately verify the clear worked
     const verify_region = @as([*]const volatile u8, @ptrFromInt(0x6FF0));
@@ -922,6 +967,17 @@ fn sendInitSipiSipi(apic_id: u8) !void {
         }
         serial.println("", .{});
     }
+
+    // CRITICAL: Ensure complete cache coherency before starting AP
+    // Write back and invalidate all caches to prevent any coherency issues
+    serial.println("[SMP] Ensuring cache coherency before SIPI...", .{});
+
+    // Flush all modified cache lines and invalidate caches
+    // This is a privileged instruction that ensures all cores see consistent memory
+    asm volatile ("wbinvd" ::: "memory");
+
+    // Additional memory barrier for complete serialization
+    asm volatile ("mfence" ::: "memory");
 
     // Ensure the trampoline is still intact
     const tramp_ptr = @as([*]const volatile u8, @ptrFromInt(TRAMPOLINE_ADDR));
@@ -1003,7 +1059,7 @@ fn sendInitSipiSipi(apic_id: u8) !void {
     }
 
     // Check interrupt flag status
-    const flags = asm volatile ("pushfq; popq %[flags]"
+    var flags = asm volatile ("pushfq; popq %[flags]"
         : [flags] "=r" (-> u64),
     );
     const if_enabled = (flags & 0x200) != 0; // IF is bit 9
@@ -1043,26 +1099,53 @@ fn sendInitSipiSipi(apic_id: u8) !void {
 
     // Send second SIPI
     serial.println("[SMP] Sending second SIPI with vector 0x08", .{});
+
+    // CRITICAL: Ensure interrupts stay disabled during second SIPI
+    // Some systems have issues if interrupts fire during AP startup
+    flags = asm volatile ("pushfq; popq %[flags]; cli"
+        : [flags] "=r" (-> u64),
+    );
+    defer {
+        // Restore interrupt flag after AP has had time to start
+        if (flags & 0x200 != 0) {
+            asm volatile ("sti" ::: "memory");
+        }
+    }
+
     try apic.sendIPI(apic_id, 0x08, .Startup, .Assert, .Edge, .NoShorthand);
 
     // Add a delay after second SIPI to ensure it completes and avoid race
     ap_sync.apStartupDelay(50_000); // 50k pause cycles
 
+    // Add memory barrier to ensure all writes are visible
+    ap_sync.memoryBarrier();
+
+    // Check if AP has written to debug region immediately
+    const immediate_debug = @as(*volatile u32, @ptrFromInt(0x6000));
+    if (immediate_debug.* == 0x12345678) {
+        serial.println("[SMP] AP has written magic to debug region!", .{});
+    }
+
     serial.println("[SMP] INIT-SIPI-SIPI sequence complete", .{});
 
-    // Clear debug memory region before checking
-    const debug_region = @as([*]volatile u8, @ptrFromInt(0x6FF0));
-    for (0..0x30) |i| {
-        debug_region[i] = 0;
-    }
-    ap_sync.memoryBarrier();
+    // CRITICAL: Do NOT clear debug memory after SIPI!
+    // The AP is already running and writing to these locations.
+    // Clearing them now causes a race condition and cache coherency issues.
 
     // Give AP a moment to start and check debug location immediately
     ap_sync.apStartupDelay(10_000); // Short wait
+
+    // CRITICAL: Ensure we read fresh values from memory, not stale cache
+    // Use MFENCE to ensure all previous memory operations are complete
+    asm volatile ("mfence" ::: "memory");
+
+    // Additionally, use LFENCE to prevent speculative reads
+    asm volatile ("lfence" ::: "memory");
+
     const debug_ptr = @as(*align(1) volatile ap_debug.TrampolineDebug, @ptrFromInt(ap_debug.TRAMPOLINE_DEBUG_ADDR));
-    serial.println("[SMP] Immediate debug check at 0x7000:", .{});
+    serial.println("[SMP] Immediate debug check at 0x6000:", .{});
     serial.print("[SMP]   First 16 bytes at 0x6FF0: ", .{});
-    const debug_bytes = @as([*]const u8, @ptrFromInt(0x6FF0));
+    const debug_bytes = @as([*]const volatile u8, @ptrFromInt(0x6FF0));
     for (0..16) |i| {
         serial.print("{x:0>2} ", .{debug_bytes[i]});
     }

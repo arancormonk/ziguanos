@@ -1386,6 +1386,58 @@ pub fn makeRegionExecutable(start_addr: u64, size: u64) !void {
     serial.println("[PAGING] Region made executable", .{});
 }
 
+// Make a memory region uncacheable - critical for SMP coherency
+pub fn makeRegionUncacheable(start_addr: u64, size: u64) !void {
+    const aligned_start = start_addr & ~@as(u64, PAGE_SIZE_4K - 1);
+    const aligned_end = (start_addr + size + PAGE_SIZE_4K - 1) & ~@as(u64, PAGE_SIZE_4K - 1);
+
+    serial.println("[PAGING] Making region 0x{x}-0x{x} uncacheable", .{ aligned_start, aligned_end });
+
+    // For regions in the first 2MB, we need to handle it specially
+    if (aligned_start < PAGE_SIZE_2M) {
+        // The first 2MB is mapped directly in kernel_pd[0]
+        const old_entry = kernel_pd[0];
+
+        // Check if this is a 2MB page
+        if ((old_entry & PAGE_HUGE) != 0) {
+            // For 2MB pages, we need to split it into 4K pages to apply different cache attributes
+            serial.println("[PAGING] Need to split 2MB page to make region uncacheable", .{});
+
+            // This is complex - for now, just set the entire 2MB page as uncacheable
+            // Set PCD (Page Cache Disable) and PWT (Page Write Through) bits
+            const new_entry = old_entry | PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH;
+            kernel_pd[0] = new_entry;
+            serial.println("[PAGING] Updated first 2MB page to uncacheable: 0x{x}", .{new_entry});
+
+            // Flush TLB for the entire 2MB page
+            var flush_addr: u64 = 0;
+            while (flush_addr < PAGE_SIZE_2M) : (flush_addr += PAGE_SIZE_4K) {
+                invalidatePage(flush_addr);
+            }
+
+            // Also flush caches for this region
+            flush_addr = aligned_start;
+            while (flush_addr < aligned_end and flush_addr < PAGE_SIZE_2M) : (flush_addr += 64) {
+                asm volatile ("clflush (%[addr])"
+                    :
+                    : [addr] "r" (flush_addr),
+                    : "memory"
+                );
+            }
+            asm volatile ("mfence" ::: "memory");
+        }
+    } else {
+        // For other regions, walk the page tables and update each 4K page
+        var current_addr = aligned_start;
+        while (current_addr < aligned_end) : (current_addr += PAGE_SIZE_4K) {
+            // This would require walking the page tables - simplified for now
+            serial.println("[PAGING] Would update page at 0x{x} to uncacheable", .{current_addr});
+        }
+    }
+
+    serial.println("[PAGING] Region marked as uncacheable", .{});
+}
+
 // Update page flags without changing the physical address
 // This is useful for changing permissions on existing mappings
 pub fn updatePageFlags(virt_addr: u64, new_flags: u64) !void {

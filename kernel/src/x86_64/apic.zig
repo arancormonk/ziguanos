@@ -348,33 +348,23 @@ pub fn writeRegister(offset: u32, value: u32) void {
             // Strong memory barriers to ensure write completes
             asm volatile ("mfence; lfence; sfence" ::: "memory");
 
-            // DO NOT read back ICR after SIPI - it can cause faults
-            // Intel SDM says ICR might be busy and not readable
-            serial.println("[APIC] SIPI write completed (no readback for safety)", .{});
-        } else {
-            // Normal register write
-            reg_ptr[0] = value;
-        }
-
-        // Memory barrier after write
-        asm volatile ("mfence" ::: "memory");
-
-        // For SIPI, handle special requirements
-        if (offset == APIC_ICR_LOW and (value & 0x700) == 0x600) { // Check for Startup IPI
-            serial.println("[APIC] SIPI write completed, adding delay...", .{});
-
             // Small delay loop to give AP time to start
             var delay_count: u32 = 0;
             while (delay_count < 1000) : (delay_count += 1) {
                 asm volatile ("pause" ::: "memory");
             }
 
-            // Skip ESR check during SIPI - it can cause issues
-            // The ESR can be checked later after AP startup
-
-            // Debug for SIPI
+            // DO NOT read back ICR after SIPI - it can cause faults
+            // Intel SDM says ICR might be busy and not readable
+            serial.println("[APIC] SIPI write completed (no readback for safety)", .{});
             serial.println("[APIC] SIPI handling complete", .{});
         } else {
+            // Normal register write
+            reg_ptr[0] = value;
+
+            // Memory barrier after write
+            asm volatile ("mfence" ::: "memory");
+
             // Normal readback for non-SIPI writes
             const readback = reg_ptr[0];
 
@@ -672,9 +662,10 @@ pub fn sendIPI(dest_apic_id: u8, vector: u8, delivery_mode: IpiDeliveryMode, lev
 
     // For SIPI, add extra delay to ensure AP doesn't interfere
     if (delivery_mode == .Startup) {
-        // Small busy wait to let AP get past initial real mode
+        // Longer busy wait to let AP get past initial real mode
+        // This helps prevent race conditions during AP startup
         var delay: u32 = 0;
-        while (delay < 100000) : (delay += 1) {
+        while (delay < 500000) : (delay += 1) {
             asm volatile ("pause" ::: "memory");
         }
         serial.println("[APIC] Post-SIPI delay completed", .{});
@@ -686,7 +677,15 @@ pub fn sendIPI(dest_apic_id: u8, vector: u8, delivery_mode: IpiDeliveryMode, lev
         serial.println("[APIC] After INIT write: vector=0x{x}, dest={}, ICR now=0x{x}", .{ vector, dest_apic_id, final_icr });
     } else if (delivery_mode == .Startup) {
         // Don't read ICR after SIPI - it can cause faults
+        // Also add extra synchronization to ensure AP doesn't interfere
+        asm volatile ("mfence; lfence" ::: "memory");
         serial.println("[APIC] After SIPI write: vector=0x{x}, dest={} (no ICR read)", .{ vector, dest_apic_id });
+
+        // Extra delay after printing to avoid race with AP
+        var extra_delay: u32 = 0;
+        while (extra_delay < 10000) : (extra_delay += 1) {
+            asm volatile ("pause" ::: "memory");
+        }
     }
 }
 
