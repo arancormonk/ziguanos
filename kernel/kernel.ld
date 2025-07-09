@@ -39,7 +39,9 @@ SECTIONS
 
     /* SMP trampoline code - must be kept together in its own section */
     .trampoline ALIGN(4096) : {
-        *(.data.trampoline)
+        PROVIDE(ap_trampoline_start = .);
+        KEEP(*(.data.trampoline))
+        PROVIDE(ap_trampoline_end = .);
     }
     
     /* Initialized data */

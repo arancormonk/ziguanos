@@ -16,9 +16,9 @@ var zero_on_alloc: bool = true; // Enable memory zeroing by default
 pub fn zeroMemoryRange(addr: u64, size: u64) void {
     if (addr == 0 or size == 0) return;
 
-    // NEVER zero the AP trampoline area (0x5000-0x6000)
-    const TRAMPOLINE_START: u64 = 0x5000;
-    const TRAMPOLINE_END: u64 = 0x6000;
+    // NEVER zero the AP trampoline area (0x8000-0x9000)
+    const TRAMPOLINE_START: u64 = 0x8000;
+    const TRAMPOLINE_END: u64 = 0x9000;
     if (addr >= TRAMPOLINE_START and addr < TRAMPOLINE_END) {
         return; // Silently skip zeroing protected memory
     }
@@ -34,9 +34,9 @@ pub fn zeroMemoryRange(addr: u64, size: u64) void {
 pub fn poisonMemoryRange(addr: u64, size: u64) void {
     if (addr == 0 or size == 0) return;
 
-    // NEVER poison the AP trampoline area (0x5000-0x6000)
-    const TRAMPOLINE_START: u64 = 0x5000;
-    const TRAMPOLINE_END: u64 = 0x6000;
+    // NEVER poison the AP trampoline area (0x8000-0x9000)
+    const TRAMPOLINE_START: u64 = 0x8000;
+    const TRAMPOLINE_END: u64 = 0x9000;
     if (addr >= TRAMPOLINE_START and addr < TRAMPOLINE_END) {
         return; // Silently skip poisoning protected memory
     }

@@ -91,21 +91,21 @@ pub var debug_state: ApDebugState = .{};
 
 /// Memory location for trampoline to update stages
 /// Located at a fixed address that trampoline can write to
-pub const TRAMPOLINE_DEBUG_ADDR: u64 = 0x9000;
+pub const TRAMPOLINE_DEBUG_ADDR: u64 = 0x9004;
 
 /// Structure at TRAMPOLINE_DEBUG_ADDR for trampoline communication
 pub const TrampolineDebug = extern struct {
-    magic: u32, // 0x12345678 to verify structure
-    cpu_id: u32, // CPU being initialized
-    stage: u8, // Current stage (ApStage enum value)
-    error_code: u8, // Error code if any
+    magic: u32, // 0x12345678 to verify structure (at 0x9004)
+    cpu_id: u32, // CPU being initialized (at 0x9008)
+    stage: u8, // Current stage (ApStage enum value) (at 0x900C)
+    error_code: u8, // Error code if any (at 0x900D)
     padding: [6]u8, // Alignment padding
-    debug_value: u64, // Additional debug value
+    debug_value: u64, // Additional debug value (at 0x9020)
 };
 
 /// Check and process trampoline debug updates
 pub fn checkTrampolineDebug() void {
-    const debug_ptr = @as(*volatile TrampolineDebug, @ptrFromInt(TRAMPOLINE_DEBUG_ADDR));
+    const debug_ptr = @as(*align(1) volatile TrampolineDebug, @ptrFromInt(TRAMPOLINE_DEBUG_ADDR));
 
     // Check magic value
     if (debug_ptr.magic != 0x12345678) return;

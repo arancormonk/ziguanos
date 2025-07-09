@@ -30,8 +30,8 @@ const PMM_RESERVED_BASE: u64 = 0x100000; // Reserve first 1MB
 const MAX_MEMORY: u64 = 0x400000000; // 16GB max
 
 // Protected memory ranges that should never be freed or poisoned
-const TRAMPOLINE_START: u64 = 0x5000;
-const TRAMPOLINE_END: u64 = 0x6000;
+const TRAMPOLINE_START: u64 = 0x8000;
+const TRAMPOLINE_END: u64 = 0x9000;
 
 // Get kernel base dynamically from runtime info
 fn getKernelBase() u64 {
@@ -174,13 +174,13 @@ pub fn init(boot_info: *const uefi_boot.UEFIBootInfo) void {
     markPagesAsUsedInitial(bitmap_start, bitmap_pages);
     reserved_pages += bitmap_pages;
 
-    // Reserve low memory area for AP trampoline (0x5000-0x6000)
+    // Reserve low memory area for AP trampoline (0x8000-0x9000)
     // This is critical for SMP initialization
-    const trampoline_start = 0x5000 / PAGE_SIZE;
+    const trampoline_start = 0x8000 / PAGE_SIZE;
     const trampoline_pages = 1; // One 4KB page
     markPagesAsUsedInitial(trampoline_start, trampoline_pages);
     reserved_pages += trampoline_pages;
-    serial.print("[PMM] Reserved AP trampoline area at 0x5000\n", .{});
+    serial.print("[PMM] Reserved AP trampoline area at 0x8000\n", .{});
 
     // Reserve debug area for AP startup (0x9000-0xA000)
     // The trampoline writes debug information here during startup
