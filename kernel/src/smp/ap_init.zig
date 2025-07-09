@@ -585,26 +585,88 @@ fn busyWait(iterations: u32) void {
     }
 }
 
-/// Wait using TSC for accurate delays when timer interrupts aren't enabled yet
-fn tscWait(ms: u64) void {
-    const tsc_freq = timer.getTSCFrequency();
-    if (tsc_freq == 0) {
-        serial.println("[SMP] WARNING: TSC not calibrated, falling back to busy wait", .{});
-        const iterations = @min(ms * 100_000, std.math.maxInt(u32));
-        busyWait(@intCast(iterations)); // Approximate
+/// PIT-based delay using polling (no interrupts required)
+/// Uses PIT channel 2 which is typically used for PC speaker
+fn pitPollingDelay(microseconds: u64) void {
+    // PIT frequency is 1193182 Hz
+    const PIT_FREQUENCY: u64 = 1193182;
+
+    // Calculate ticks needed (with bounds checking)
+    const ticks_needed = (PIT_FREQUENCY * microseconds) / 1_000_000;
+    if (ticks_needed == 0) return; // Too short to measure
+    if (ticks_needed > 0xFFFF) {
+        // Too long for one PIT cycle, break into chunks
+        const chunks = ticks_needed / 0xFFFF;
+        const remainder = ticks_needed % 0xFFFF;
+
+        var i: u64 = 0;
+        while (i < chunks) : (i += 1) {
+            pitPollingDelayTicks(0xFFFF);
+        }
+        if (remainder > 0) {
+            pitPollingDelayTicks(@intCast(remainder));
+        }
         return;
     }
 
-    const start = timer.readTSC();
-    const ticks_to_wait = (tsc_freq * ms) / 1000;
-    serial.println("[SMP] tscWait({} ms) - waiting {} TSC ticks", .{ ms, ticks_to_wait });
+    pitPollingDelayTicks(@intCast(ticks_needed));
+}
 
-    while (timer.readTSC() - start < ticks_to_wait) {
+/// Helper to delay for a specific number of PIT ticks
+fn pitPollingDelayTicks(ticks: u16) void {
+    const PIT_CHANNEL2: u16 = 0x42;
+    const PIT_COMMAND: u16 = 0x43;
+    const PIT_CONTROL: u16 = 0x61;
+
+    // Save current state of port 0x61
+    const saved_state = asm volatile ("inb %[port], %[result]"
+        : [result] "={al}" (-> u8),
+        : [port] "N{dx}" (PIT_CONTROL),
+    );
+
+    // Configure PIT channel 2 for one-shot mode
+    asm volatile ("outb %[val], %[port]"
+        :
+        : [val] "{al}" (@as(u8, 0xB0)), // Channel 2, LSB/MSB, mode 0
+          [port] "N{dx}" (PIT_COMMAND),
+    );
+
+    // Load counter value
+    asm volatile ("outb %[val], %[port]"
+        :
+        : [val] "{al}" (@as(u8, @truncate(ticks & 0xFF))),
+          [port] "N{dx}" (PIT_CHANNEL2),
+    );
+    asm volatile ("outb %[val], %[port]"
+        :
+        : [val] "{al}" (@as(u8, @truncate(ticks >> 8))),
+          [port] "N{dx}" (PIT_CHANNEL2),
+    );
+
+    // Enable gate and disable speaker
+    const new_state = (saved_state & 0xFC) | 0x01;
+    asm volatile ("outb %[val], %[port]"
+        :
+        : [val] "{al}" (new_state),
+          [port] "N{dx}" (PIT_CONTROL),
+    );
+
+    // Poll until counter reaches 0 (OUT2 goes high)
+    while (true) {
+        const status = asm volatile ("inb %[port], %[result]"
+            : [result] "={al}" (-> u8),
+            : [port] "N{dx}" (PIT_CONTROL),
+        );
+        if ((status & 0x20) != 0) break; // Check OUT2 bit
         asm volatile ("pause" ::: "memory");
     }
 
-    const elapsed = (timer.readTSC() - start) * 1000 / tsc_freq;
-    serial.println("[SMP] tscWait complete after {} ms", .{elapsed});
+    // Restore original state
+    asm volatile ("outb %[val], %[port]"
+        :
+        : [val] "{al}" (saved_state),
+          [port] "N{dx}" (PIT_CONTROL),
+    );
 }
 
 /// Send INIT-SIPI-SIPI sequence to start AP
@@ -673,9 +735,9 @@ fn sendInitSipiSipi(apic_id: u8) !void {
     // Now send the actual INIT assert
     try apic.sendIPI(apic_id, 0, .Init, .Assert, .Edge, .NoShorthand);
 
-    // Wait 10ms using TSC for accurate delay (Intel SDM requirement)
+    // Wait 10ms using PIT polling (Intel SDM requirement)
     serial.println("[SMP] Waiting 10ms after INIT...", .{});
-    tscWait(10); // Use TSC-based wait since timer interrupts aren't enabled yet
+    pitPollingDelay(10_000); // 10ms = 10,000 microseconds
 
     // Check ICR status after INIT
     const icr_after_init = apic.readRegister(0x300); // APIC_ICR_LOW
@@ -739,7 +801,7 @@ fn sendInitSipiSipi(apic_id: u8) !void {
 
     // Wait 200us (0.2ms) between SIPIs as per Intel SDM
     serial.println("[SMP] Waiting 200us between SIPIs...", .{});
-    tscWait(1); // Wait at least 1ms
+    pitPollingDelay(200); // Wait 200 microseconds
 
     // Send second SIPI
     serial.println("[SMP] Sending second SIPI with vector 0x05", .{});
