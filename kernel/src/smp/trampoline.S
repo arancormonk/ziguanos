@@ -32,25 +32,25 @@ ap_rm_entry:
     mov %ax, %ds
     mov %ax, %es
 
-    # Debug markers at start of debug range (0x9000...)
+    # Debug markers at start of debug range (0x5FF0...)
     mov $0xDEAD, %ax
-    mov %ax, 0x9000
+    mov %ax, 0x5FF0
     mov $0xBEEF, %ax
-    mov %ax, 0x9002
+    mov %ax, 0x5FF2
 
     # Debug writes to track real mode entry
-    movl $0x12345678, 0x9004       # Magic
+    movl $0x12345678, 0x6000       # Magic
     movl (ap_cpu_id - ap_trampoline_start + 0x8000), %eax
-    movl %eax, 0x9008              # CPU ID
-    movb $1, 0x900C                # Stage = RealMode16
-    movb $0, 0x900D                # Error = 0
+    movl %eax, 0x6004              # CPU ID
+    movb $1, 0x6008                # Stage = RealMode16
+    movb $0, 0x6009                # Error = 0
 
     # Load GDT pointer using absolute addressing
     # GDT descriptor will be placed at 0x8000 + ap_gdtr offset
     lgdt (ap_gdtr - ap_trampoline_start + 0x8000)
 
     # Debug marker after lgdt
-    # movw $0x1111, 0x9010
+    movw $0x1111, 0x5FF4
 
     # Enable protected mode
     mov %cr0, %eax
@@ -58,7 +58,7 @@ ap_rm_entry:
     mov %eax, %cr0
 
     # Debug marker after enabling protected mode
-    movw $0x2222, 0x9012
+    movw $0x2222, 0x5FF6
 
     # Far jump to 32-bit protected mode
     # CS = 0x08 (code segment), EIP = 32-bit entry relative to 0x8000
@@ -68,7 +68,7 @@ ap_rm_entry:
 .code32
 ap_exception_handler:
     # Write exception marker
-    movl $0xDEADBEEF, 0x9014
+    movl $0xDEADBEEF, 0x5FF8
     # Halt
 1:  hlt
     jmp 1b
@@ -78,7 +78,7 @@ ap_exception_handler:
 .align 16
 ap_pm_entry:
     # Debug marker for protected mode entry
-    movl $0x3333, 0x9018
+    movl $0x3333, 0x5FFC
 
     # Setup segments
     mov $0x10, %ax      # Data segment selector
@@ -93,11 +93,11 @@ ap_pm_entry:
     lidt (ap_idtr - ap_trampoline_start + 0x8000)
 
     # Debug writes for protected mode stage
-    movl $0x12345678, 0x9004       # Magic
+    movl $0x12345678, 0x6000       # Magic
     movl (ap_cpu_id - ap_trampoline_start + 0x8000), %eax
-    movl %eax, 0x9008              # CPU ID
-    movb $2, 0x900C                # Stage = ProtectedMode32
-    movb $0, 0x900D                # Error = 0
+    movl %eax, 0x6004              # CPU ID
+    movb $2, 0x6008                # Stage = ProtectedMode32
+    movb $0, 0x6009                # Error = 0
 
     # Load page table base into CR3
     # The BSP will write the PML4 address to ap_pml4_addr
@@ -137,11 +137,11 @@ ap_lm_entry:
     mov %ax, %ss
 
     # Write debug info: LongMode64 stage (3)
-    movl $0x12345678, 0x9004       # Magic
+    movl $0x12345678, 0x6000       # Magic
     movl (ap_cpu_id - ap_trampoline_start + 0x8000), %eax
-    movl %eax, 0x9008              # CPU ID
-    movb $3, 0x900C                # Stage = LongMode64
-    movb $0, 0x900D                # Error = 0
+    movl %eax, 0x6004              # CPU ID
+    movb $3, 0x6008                # Stage = LongMode64
+    movb $0, 0x6009                # Error = 0
 
     # Get CPU ID from startup data
     movl (ap_cpu_id - ap_trampoline_start + 0x8000), %edi
@@ -154,7 +154,7 @@ ap_lm_entry:
     mov (%rbx,%rax), %rsp
 
     # Store stack pointer as debug value
-    mov %rsp, 0x9020               # Debug value field
+    mov %rsp, 0x6010               # Debug value field
 
     # Clear base pointer
     xor %rbp, %rbp

@@ -18,9 +18,16 @@ pub fn zeroMemoryRange(addr: u64, size: u64) void {
 
     // NEVER zero the AP trampoline area (0x8000-0x9000)
     const TRAMPOLINE_START: u64 = 0x8000;
-    const TRAMPOLINE_END: u64 = 0x9000;
+    const TRAMPOLINE_END: u64 = 0x8000 + 4096; // End of trampoline page
     if (addr >= TRAMPOLINE_START and addr < TRAMPOLINE_END) {
         return; // Silently skip zeroing protected memory
+    }
+
+    // Also protect the AP debug area (0x6000-0x7000) during SMP initialization
+    const DEBUG_START: u64 = 0x6000;
+    const DEBUG_END: u64 = 0x6000 + 4096; // End of debug page
+    if (addr >= DEBUG_START and addr < DEBUG_END) {
+        return; // Silently skip zeroing debug memory
     }
 
     const ptr = @as([*]u8, @ptrFromInt(addr));
@@ -36,9 +43,16 @@ pub fn poisonMemoryRange(addr: u64, size: u64) void {
 
     // NEVER poison the AP trampoline area (0x8000-0x9000)
     const TRAMPOLINE_START: u64 = 0x8000;
-    const TRAMPOLINE_END: u64 = 0x9000;
+    const TRAMPOLINE_END: u64 = 0x8000 + 4096; // End of trampoline page
     if (addr >= TRAMPOLINE_START and addr < TRAMPOLINE_END) {
         return; // Silently skip poisoning protected memory
+    }
+
+    // Also protect the AP debug area (0x6000-0x7000) during SMP initialization
+    const DEBUG_START: u64 = 0x6000;
+    const DEBUG_END: u64 = 0x6000 + 4096; // End of debug page
+    if (addr >= DEBUG_START and addr < DEBUG_END) {
+        return; // Silently skip poisoning debug memory
     }
 
     var guard = stack_security.protect();
