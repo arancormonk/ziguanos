@@ -308,18 +308,29 @@ pub fn initAP(cpu_id: u32, apic_id: u8) !void {
                 const lgdt_marker = @as(*volatile u16, @ptrFromInt(0x6FF4)).*;
                 const cr0_marker = @as(*volatile u16, @ptrFromInt(0x6FF6)).*;
                 const pm_marker = @as(*volatile u32, @ptrFromInt(0x6FFC)).*;
+                const pae_marker = @as(*volatile u32, @ptrFromInt(0x7000)).*;
+                const cr3_marker = @as(*volatile u32, @ptrFromInt(0x7004)).*;
+                const lme_marker = @as(*volatile u32, @ptrFromInt(0x7008)).*;
+                const pg_marker = @as(*volatile u32, @ptrFromInt(0x700C)).*;
 
-                if (debug_ptr.magic == 0x12345678 or early_marker != 0 or marker != 0 or lgdt_marker != 0 or cr0_marker != 0 or pm_marker != 0) {
-                    serial.println("[SMP] Direct debug check: magic=0x{x}, early=0x{x}, marker=0x{x}, lgdt=0x{x}, cr0=0x{x}, pm=0x{x}, CPU={}, stage={}", .{
+                if (debug_ptr.magic == 0x12345678 or early_marker != 0 or marker != 0 or lgdt_marker != 0 or cr0_marker != 0 or pm_marker != 0 or pae_marker != 0 or cr3_marker != 0 or lme_marker != 0 or pg_marker != 0) {
+                    serial.println("[SMP] Direct debug check: magic=0x{x}, early=0x{x}, marker=0x{x}, lgdt=0x{x}, cr0=0x{x}, pm=0x{x}", .{
                         debug_ptr.magic,
                         early_marker,
                         marker,
                         lgdt_marker,
                         cr0_marker,
                         pm_marker,
-                        debug_ptr.cpu_id,
-                        debug_ptr.stage,
                     });
+                    if (pae_marker != 0 or cr3_marker != 0 or lme_marker != 0 or pg_marker != 0) {
+                        serial.println("[SMP]   Long mode: pae=0x{x}, cr3=0x{x}, lme=0x{x}, pg=0x{x}", .{
+                            pae_marker,
+                            cr3_marker,
+                            lme_marker,
+                            pg_marker,
+                        });
+                    }
+                    serial.println("[SMP]   CPU={}, stage={}", .{ debug_ptr.cpu_id, debug_ptr.stage });
                 }
             }
         }
@@ -924,7 +935,6 @@ fn sendInitSipiSipi(apic_id: u8) !void {
     // Important: Don't clear the trampoline area (0x8000), only debug areas
     // NOTE: These addresses must be within mapped memory regions
     // Make sure these locations are accessible before writing
-    const debug_addr_3 = @as(*volatile u32, @ptrFromInt(0x7000));
 
     // Clear debug markers at beginning of debug range
     const early_marker_1 = @as(*volatile u16, @ptrFromInt(0x6FF0));
@@ -933,17 +943,24 @@ fn sendInitSipiSipi(apic_id: u8) !void {
     const clear_cr0_marker = @as(*volatile u16, @ptrFromInt(0x6FF6));
     const clear_exception_marker = @as(*volatile u32, @ptrFromInt(0x6FF8));
     const clear_pm_marker = @as(*volatile u32, @ptrFromInt(0x6FFC));
+    const clear_pae_marker = @as(*volatile u32, @ptrFromInt(0x7000));
+    const clear_cr3_marker = @as(*volatile u32, @ptrFromInt(0x7004));
+    const clear_lme_marker = @as(*volatile u32, @ptrFromInt(0x7008));
+    const clear_pg_marker = @as(*volatile u32, @ptrFromInt(0x700C));
     const clear_stack_debug = @as(*volatile u64, @ptrFromInt(0x7010));
 
     // NOTE: Clear debug regions but avoid 0x6FF4 to prevent conflicts
     // The AP will write to 0x6FF4 after lgdt, and we don't want to interfere
     early_marker_1.* = 0;
     early_marker_2.* = 0;
-    debug_addr_3.* = 0; // Clear magic at 0x7000
     // Skip clearing 0x6FF4 (lgdt marker) to avoid race condition
     clear_cr0_marker.* = 0;
     clear_exception_marker.* = 0;
     clear_pm_marker.* = 0;
+    clear_pae_marker.* = 0;
+    clear_cr3_marker.* = 0;
+    clear_lme_marker.* = 0;
+    clear_pg_marker.* = 0;
     clear_stack_debug.* = 0;
 
     // Ensure writes are visible and prevent reordering
@@ -1162,6 +1179,10 @@ fn sendInitSipiSipi(apic_id: u8) !void {
     const cr0_marker = @as(*volatile u16, @ptrFromInt(0x6FF6));
     const exception_marker = @as(*volatile u32, @ptrFromInt(0x6FF8));
     const pm_marker = @as(*volatile u32, @ptrFromInt(0x6FFC));
+    const pae_marker = @as(*volatile u32, @ptrFromInt(0x7000));
+    const cr3_marker = @as(*volatile u32, @ptrFromInt(0x7004));
+    const lme_marker = @as(*volatile u32, @ptrFromInt(0x7008));
+    const pg_marker = @as(*volatile u32, @ptrFromInt(0x700C));
     const stack_value = @as(*volatile u64, @ptrFromInt(0x7010));
     serial.println("[SMP]   Early marker at 0x6FF0: 0x{x} (should be 0xDEAD if AP executed)", .{early_marker_ptr.*});
     serial.println("[SMP]   Marker at 0x6FF2: 0x{x} (should be 0xBEEF if AP started)", .{marker_ptr.*});
@@ -1169,6 +1190,10 @@ fn sendInitSipiSipi(apic_id: u8) !void {
     serial.println("[SMP]   Post-CR0 marker at 0x6FF6: 0x{x} (should be 0x2222 if CR0 modified)", .{cr0_marker.*});
     serial.println("[SMP]   Exception marker at 0x6FF8: 0x{x} (should be 0 if no exception)", .{exception_marker.*});
     serial.println("[SMP]   PM entry marker at 0x6FFC: 0x{x} (should be 0x3333 if reached 32-bit mode)", .{pm_marker.*});
+    serial.println("[SMP]   PAE enabled marker at 0x7000: 0x{x} (should be 0x4444 if PAE set)", .{pae_marker.*});
+    serial.println("[SMP]   CR3 loaded marker at 0x7004: 0x{x} (should be 0x5555 if CR3 loaded)", .{cr3_marker.*});
+    serial.println("[SMP]   EFER.LME marker at 0x7008: 0x{x} (should be 0x6666 if LME set)", .{lme_marker.*});
+    serial.println("[SMP]   Paging enabled marker at 0x700C: 0x{x} (should be 0x7777 if paging on)", .{pg_marker.*});
     serial.println("[SMP]   Stack value at 0x7010: 0x{x} (stack pointer in long mode)", .{stack_value.*});
 
     // Also dump the first part of the trampoline to verify it looks correct

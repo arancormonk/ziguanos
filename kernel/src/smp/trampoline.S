@@ -17,12 +17,14 @@ ap_trampoline_start:
 # Real mode startup code (16-bit)
 .code16
 ap_rm_entry:
+    # Intel SDM: APs start execution in real mode with CS:IP from SIPI vector
     # CRITICAL: Do NOT write to any memory locations until segments are properly set up
     # Writing to unmapped or invalid memory in real mode can cause system hangs
 
+    # Intel SDM: Step 1 - Disable interrupts immediately
     cli
 
-    # Disable NMIs by setting bit 7 of CMOS address port
+    # Intel SDM: Step 2 - Disable NMIs to prevent any interruption
     # This prevents NMIs from interrupting critical startup sequence
     mov $0x70, %dx
     in %dx, %al
@@ -30,15 +32,19 @@ ap_rm_entry:
     out %al, %dx
 
     # Add a delay loop to ensure BSP completes APIC write
-    # Increased delay to avoid race conditions
+    # and to avoid any potential race conditions
     mov $0x20000, %cx
 1:  dec %cx
     jnz 1b
 
+    # Intel SDM: Step 3 - Initialize segment registers to known values
     # Load data segment FIRST before any memory accesses
     xor %ax, %ax
     mov %ax, %ds
     mov %ax, %es
+    mov %ax, %ss        # Also clear SS
+    mov %ax, %fs        # Clear FS
+    mov %ax, %gs        # Clear GS
 
     # Debug markers at start of debug range (0x6FF0...)
     mov $0xDEAD, %ax
@@ -63,47 +69,29 @@ ap_rm_entry:
     movb $1, 0x6008                # Stage = RealMode16
     movb $0, 0x6009                # Error = 0
 
-    # Load GDT pointer using absolute addressing
+    # Intel SDM: Step 4 - Load GDT before switching to protected mode
     # The GDTR is located at a fixed offset from trampoline start
     lgdt (ap_gdtr - ap_trampoline_start + 0x8000)
 
-    # CRITICAL: Add serialization after lgdt to ensure it completes
-    # This prevents memory coherence issues with the BSP
+    # Intel SDM: Serialization after LGDT is recommended
+    # Jump to next instruction to serialize
     jmp 1f
 1:  nop
 
-    # Add a small delay to ensure GDT load is fully processed
-    # Use PAUSE instruction which is designed for spin-wait loops
-    mov $0x100, %cx
-2:  pause
-    dec %cx
-    jnz 2b
-
-    # Debug marker after lgdt (with proper serialization)
+    # Debug marker after lgdt
     movw $0x1111, 0x6FF4
     
-    # CRITICAL: Ensure the store is globally visible before proceeding
-    # This is the write that causes the hang, so we need full serialization
-    push %eax
-    push %ebx
-    push %ecx
-    push %edx
-    xor %eax, %eax
-    cpuid
-    pop %edx
-    pop %ecx
-    pop %ebx
-    pop %eax
-
-    # Enable protected mode
+    # Intel SDM: Step 5 - Switch to protected mode
+    # Set PE bit in CR0 to enable protected mode
     mov %cr0, %eax
-    or $1, %eax
+    or $1, %eax         # CR0.PE = 1
     mov %eax, %cr0
 
     # Debug marker after enabling protected mode
     movw $0x2222, 0x6FF6
 
-    # Far jump to 32-bit protected mode
+    # Intel SDM: Step 6 - Execute far jump to load CS with protected mode selector
+    # This is REQUIRED to complete the transition to protected mode
     # CS = 0x08 (code segment), EIP = 32-bit entry relative to 0x8000
     ljmp $0x08, $(ap_pm_entry - ap_trampoline_start + 0x8000)
 
@@ -123,7 +111,7 @@ ap_pm_entry:
     # Debug marker for protected mode entry
     movl $0x3333, 0x6FFC
 
-    # Setup segments
+    # Setup segments - CRITICAL: Must be done first in protected mode
     mov $0x10, %ax      # Data segment selector
     mov %ax, %ds
     mov %ax, %es
@@ -142,26 +130,48 @@ ap_pm_entry:
     movb $2, 0x6008                # Stage = ProtectedMode32
     movb $0, 0x6009                # Error = 0
 
-    # Load page table base into CR3
-    # The BSP will write the PML4 address to ap_pml4_addr
-    mov (ap_pml4_addr - ap_trampoline_start + 0x8000), %eax
-    mov %eax, %cr3
-
-    # Enable PAE
+    # Intel SDM: Step 1 - Enable PAE (CR4.PAE) BEFORE any other long mode setup
     mov %cr4, %eax
     or $0x20, %eax      # CR4.PAE = 1
     mov %eax, %cr4
 
-    # Set long mode enable in EFER MSR
+    # Debug marker after PAE enabled
+    movl $0x4444, 0x7000
+
+    # Serializing instruction to ensure PAE is enabled
+    xor %eax, %eax
+    cpuid
+
+    # Intel SDM: Step 2 - Load page table base into CR3
+    # The BSP will write the PML4 address to ap_pml4_addr
+    mov (ap_pml4_addr - ap_trampoline_start + 0x8000), %eax
+    mov %eax, %cr3
+
+    # Debug marker after CR3 loaded
+    movl $0x5555, 0x7004
+
+    # Intel SDM: Step 3 - Set long mode enable in EFER MSR
+    # This MUST be done AFTER PAE is enabled and BEFORE paging is enabled
     mov $0xC0000080, %ecx
     rdmsr
     or $0x100, %eax     # EFER.LME = 1
     wrmsr
 
-    # Enable paging and enter long mode
+    # Debug marker after EFER.LME set
+    movl $0x6666, 0x7008
+
+    # Serializing instruction after WRMSR
+    xor %eax, %eax
+    cpuid
+
+    # Intel SDM: Step 4 - Enable paging to activate long mode
+    # This MUST be the last step - it activates long mode when CR0.PG=1
     mov %cr0, %eax
     or $0x80000000, %eax # CR0.PG = 1
     mov %eax, %cr0
+
+    # Debug marker after paging enabled
+    movl $0x7777, 0x700C
 
     # Far jump to 64-bit long mode
     # Use 64-bit code segment selector (0x18)
