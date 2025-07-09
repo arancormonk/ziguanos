@@ -20,6 +20,7 @@ pub const Config = struct {
 
     // Security configuration
     security_level: ?[]const u8 = null,
+    hmac_verification: ?bool = null,
 
     // Configuration file status
     loaded_from_file: bool = false,
@@ -38,6 +39,7 @@ pub const DEFAULT_CONFIG = Config{
     .kaslr_rdseed_retries = 1024,
     .kaslr_enforce = false,
     .security_level = null,
+    .hmac_verification = null, // null means use default based on security level
     .loaded_from_file = false,
 };
 
@@ -131,6 +133,13 @@ pub fn parseConfigContent(content: []const u8, allocator: std.mem.Allocator) !Co
                     serial.print("[CONFIG] Parsed SecurityLevel: '{s}'\r\n", .{parsed_value}) catch {};
                 } else {
                     serial.print("[CONFIG] WARNING: Invalid security level: '{s}'\r\n", .{value}) catch {};
+                }
+            } else if (std.mem.eql(u8, key, "HMACVerification")) {
+                if (parseBoolValue(value)) |parsed_value| {
+                    config.hmac_verification = parsed_value;
+                    serial.print("[CONFIG] Parsed HMACVerification: {}\r\n", .{parsed_value}) catch {};
+                } else {
+                    serial.print("[CONFIG] WARNING: Invalid boolean value for HMACVerification: '{s}'\r\n", .{value}) catch {};
                 }
             } else {
                 serial.print("[CONFIG] WARNING: Unknown configuration key: '{s}'\r\n", .{key}) catch {};
@@ -280,24 +289,45 @@ pub fn readConfigFile(
 
     serial.print("[CONFIG] Successfully read configuration file\r\n", .{}) catch {};
 
-    // Verify configuration integrity before parsing
-    const config_filename = "ziguanos.conf";
-    const is_config_valid = verify.verifyConfigurationIntegrity(
-        handle,
-        boot_services,
-        config_filename,
-        file_content,
-    );
+    // First, parse the configuration to get HMACVerification setting
+    var config = try parseConfigContent(file_content, allocator);
 
-    if (!is_config_valid) {
-        serial.print("[CONFIG] CRITICAL: Configuration integrity check FAILED. Falling back to secure defaults.\r\n", .{}) catch {};
-        return error.ConfigIntegrityFailed;
+    // Determine if HMAC verification is required
+    var require_hmac: bool = false;
+
+    if (config.hmac_verification) |hmac_setting| {
+        // Use explicit configuration setting
+        require_hmac = hmac_setting;
+        serial.print("[CONFIG] HMAC verification {s} by configuration\r\n", .{if (require_hmac) "enabled" else "disabled"}) catch {};
+    } else {
+        // Use default based on security policy
+        const verification_config = verify.VerificationConfig.getDefault();
+        require_hmac = verification_config.require_hmac;
+        serial.print("[CONFIG] HMAC verification {s} by default policy\r\n", .{if (require_hmac) "enabled" else "disabled"}) catch {};
     }
 
-    serial.print("[CONFIG] Configuration integrity verified. Proceeding with parsing.\r\n", .{}) catch {};
+    if (require_hmac) {
+        // Verify configuration integrity
+        const config_filename = "ziguanos.conf";
+        const is_config_valid = verify.verifyConfigurationIntegrity(
+            handle,
+            boot_services,
+            config_filename,
+            file_content,
+        );
 
-    // Parse the configuration
-    return parseConfigContent(file_content, allocator);
+        if (!is_config_valid) {
+            serial.print("[CONFIG] CRITICAL: Configuration integrity check FAILED. Falling back to secure defaults.\r\n", .{}) catch {};
+            config.deinit(allocator);
+            return error.ConfigIntegrityFailed;
+        }
+
+        serial.print("[CONFIG] Configuration integrity verified.\r\n", .{}) catch {};
+    } else {
+        serial.print("[CONFIG] HMAC verification skipped\r\n", .{}) catch {};
+    }
+
+    return config;
 }
 
 // Get configuration with fallback to defaults

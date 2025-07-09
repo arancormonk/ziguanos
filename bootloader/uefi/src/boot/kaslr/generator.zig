@@ -213,11 +213,21 @@ pub fn generateSegmentOffsets(num_segments: usize, available_range: u64, hardwar
 pub fn isKASLREnforcementEnabled() bool {
     // Access runtime services through system table
     const runtime_services = @import("../../utils/uefi_globals.zig").system_table.runtime_services;
+    const policy = @import("../../security/policy.zig");
+
+    // Initialize security policy if not already done
+    policy.init(runtime_services);
+
+    // In development mode, never enforce KASLR (allow boot to continue even if KASLR fails)
+    if (policy.getSecurityLevel() == .Development) {
+        serial.print("[UEFI] KASLR enforcement disabled in Development mode\r\n", .{}) catch {};
+        return false;
+    }
 
     // Initialize cache if not already done
     if (!variable_cache.isInitialized()) {
         variable_cache.init(runtime_services) catch {
-            // If cache init fails, use compile-time default
+            // If cache init fails, use compile-time default for non-development modes
             if (config.ENFORCE_KASLR_ON_FAILURE) {
                 serial.print("[UEFI] KASLR enforcement enabled by default (cache init failed)\r\n", .{}) catch {};
             }
@@ -254,24 +264,31 @@ pub fn isKASLREnabled(boot_services: *uefi.tables.BootServices) bool {
 
     // Initialize cache if not already done
     if (!variable_cache.isInitialized()) {
-        variable_cache.init(runtime_services) catch {
-            // If cache init fails, default to enabled
+        serial.print("[UEFI] KASLR: Variable cache not initialized, attempting init\r\n", .{}) catch {};
+        variable_cache.init(runtime_services) catch |err| {
+            // If cache init fails, default to enabled for security
+            serial.print("[UEFI] KASLR: Variable cache init failed: {}, defaulting to enabled\r\n", .{err}) catch {};
             return true;
         };
     }
 
     // Check KASLR enabled status from cache
     const kaslr_config = variable_cache.getKASLRConfig();
+    serial.print("[UEFI] KASLR config from cache: enabled={?}\r\n", .{kaslr_config.enabled}) catch {};
 
-    // Check if KASLR is explicitly disabled
+    // Check if KASLR is explicitly configured
     if (kaslr_config.enabled) |enabled| {
         if (!enabled) {
-            serial.print("[UEFI] KASLR disabled by UEFI variable (cached)\r\n", .{}) catch {};
+            serial.print("[UEFI] KASLR disabled by configuration (cached value: false)\r\n", .{}) catch {};
             return false;
+        } else {
+            serial.print("[UEFI] KASLR enabled by configuration (cached value: true)\r\n", .{}) catch {};
+            return true;
         }
     }
 
-    // Default to enabled
+    // Default to enabled if no explicit configuration
+    serial.print("[UEFI] KASLR: No explicit configuration found, defaulting to enabled\r\n", .{}) catch {};
     return true;
 }
 

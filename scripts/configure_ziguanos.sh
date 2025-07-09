@@ -34,6 +34,8 @@ print_usage() {
     printf "  ${CYAN}show${NC}                     - Show current configuration\n"
     printf "  ${CYAN}kaslr-enable${NC}             - Enable KASLR\n"
     printf "  ${CYAN}kaslr-disable${NC}            - Disable KASLR\n"
+    printf "  ${CYAN}hmac-enable${NC}              - Enable HMAC verification\n"
+    printf "  ${CYAN}hmac-disable${NC}             - Disable HMAC verification\n"
     printf "  ${CYAN}security-level${NC} <level>   - Set security level (development/production/strict)\n"
     printf "  ${CYAN}set${NC} <key> <value>        - Set a specific configuration value\n"
     printf "  ${CYAN}defaults${NC}                 - Reset to default configuration\n"
@@ -60,7 +62,11 @@ KASLRRdseedRetries=1024
 KASLREnforce=disabled
 
 # Security Level: development, production, strict
-SecurityLevel=production
+SecurityLevel=development
+
+# HMAC Verification: enabled, disabled
+# Controls whether configuration file HMAC verification is enforced
+HMACVerification=enabled
 
 # Additional KASLR Settings (for future use)
 # KASLRAlign=auto
@@ -159,6 +165,14 @@ case "${1:-show}" in
         set_config_value "KASLREnabled" "disabled"
         printf "${CYAN}KASLR is now disabled. Run 'zig build test' to test.${NC}\n"
         ;;
+    "hmac-enable")
+        set_config_value "HMACVerification" "enabled"
+        printf "${CYAN}HMAC verification is now enabled. Run 'zig build test' to test.${NC}\n"
+        ;;
+    "hmac-disable")
+        set_config_value "HMACVerification" "disabled"
+        printf "${CYAN}HMAC verification is now disabled. Run 'zig build test' to test.${NC}\n"
+        ;;
     "security-level")
         if [ -z "$2" ]; then
             printf "${RED}Error: Security level not specified${NC}\n"
@@ -182,7 +196,7 @@ case "${1:-show}" in
         
         # Basic validation for common keys
         case "$2" in
-            "KASLREnabled"|"KASLREnforce")
+            "KASLREnabled"|"KASLREnforce"|"HMACVerification")
                 if ! validate_boolean "$3"; then
                     exit 1
                 fi

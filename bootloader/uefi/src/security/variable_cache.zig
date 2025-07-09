@@ -56,6 +56,9 @@ pub const VariableCache = struct {
     security_level: ?u8 = null,
     security_level_attrs: u32 = 0,
 
+    hmac_verification: ?bool = null,
+    hmac_verification_attrs: u32 = 0,
+
     // KASLR configuration
     kaslr_rdrand_retries: ?u32 = null,
     kaslr_rdrand_retries_attrs: u32 = 0,
@@ -171,6 +174,11 @@ fn loadConfigurationFromFile(
         serial.print("[CACHE] Config: Security level = {} ({s})\r\n", .{ security_level_value, level }) catch {};
     }
 
+    if (config.hmac_verification) |value| {
+        cache.hmac_verification = value;
+        serial.print("[CACHE] Config: HMAC verification = {}\r\n", .{value}) catch {};
+    }
+
     // Set default attributes for file-based config
     const file_attrs = EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS;
     cache.kaslr_enabled_attrs = file_attrs;
@@ -178,6 +186,7 @@ fn loadConfigurationFromFile(
     cache.kaslr_rdseed_retries_attrs = file_attrs;
     cache.kaslr_enforce_attrs = file_attrs;
     cache.security_level_attrs = file_attrs;
+    cache.hmac_verification_attrs = file_attrs;
 
     return true;
 }
@@ -459,10 +468,10 @@ fn printCacheStatus() void {
     serial.print("[CACHE]   Kernel HMAC: {}\r\n", .{cache.kernel_hmac != null}) catch {};
     serial.print("[CACHE]   Security Level: {}\r\n", .{cache.security_level != null}) catch {};
     serial.print("[CACHE]   KASLR Config: RDRAND={}, RDSEED={}, Enforce={}, Enabled={}\r\n", .{
-        cache.kaslr_rdrand_retries != null,
-        cache.kaslr_rdseed_retries != null,
-        cache.kaslr_enforce != null,
-        cache.kaslr_enabled != null,
+        if (cache.kaslr_rdrand_retries) |retries| retries else @as(u32, 0),
+        if (cache.kaslr_rdseed_retries) |retries| retries else @as(u32, 0),
+        if (cache.kaslr_enforce) |enforce| enforce else false,
+        if (cache.kaslr_enabled) |enabled| enabled else false,
     }) catch {};
 }
 
@@ -509,6 +518,12 @@ pub fn getSecurityLevel() ?struct { level: u8, attrs: u32 } {
         return .{ .level = level, .attrs = cache.security_level_attrs };
     }
     return null;
+}
+
+// Get HMAC verification configuration
+pub fn getHMACVerification() ?bool {
+    if (!cache.initialized) return null;
+    return cache.hmac_verification;
 }
 
 // Get KASLR configuration
