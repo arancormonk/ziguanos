@@ -21,9 +21,17 @@ ap_rm_entry:
     # Writing to unmapped or invalid memory in real mode can cause system hangs
 
     cli
+    
+    # Disable NMIs by setting bit 7 of CMOS address port
+    # This prevents NMIs from interrupting critical startup sequence
+    mov $0x70, %dx
+    in %dx, %al
+    or $0x80, %al
+    out %al, %dx
 
     # Add a delay loop to ensure BSP completes APIC write
-    mov $0x10000, %cx
+    # Increased delay to avoid race conditions
+    mov $0x20000, %cx
 1:  dec %cx
     jnz 1b
 
@@ -38,6 +46,11 @@ ap_rm_entry:
     mov $0xBEEF, %ax
     mov %ax, 0x5FF2
 
+    # Small delay before any memory writes to avoid conflicts
+    mov $0x1000, %cx
+3:  dec %cx
+    jnz 3b
+    
     # Debug writes to track real mode entry
     movl $0x12345678, 0x6000       # Magic
     movl (ap_cpu_id - ap_trampoline_start + 0x8000), %eax
@@ -135,6 +148,13 @@ ap_lm_entry:
     mov %ax, %fs
     mov %ax, %gs
     mov %ax, %ss
+    
+    # Re-enable NMIs now that we're in a stable state
+    # Clear bit 7 of CMOS address port
+    mov $0x70, %dx
+    in %dx, %al
+    and $0x7F, %al
+    out %al, %dx
 
     # Write debug info: LongMode64 stage (3)
     movl $0x12345678, 0x6000       # Magic
@@ -142,6 +162,16 @@ ap_lm_entry:
     movl %eax, 0x6004              # CPU ID
     movb $3, 0x6008                # Stage = LongMode64
     movb $0, 0x6009                # Error = 0
+    
+    # Additional synchronization delay before accessing kernel resources
+    # This gives BSP time to complete SIPI and release locks
+    mov $0x200000, %rcx
+2:  pause
+    dec %rcx
+    jnz 2b
+    
+    # Memory barrier to ensure all previous operations are visible
+    mfence
 
     # Get CPU ID from startup data
     movl (ap_cpu_id - ap_trampoline_start + 0x8000), %edi

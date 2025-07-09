@@ -237,6 +237,29 @@ pub fn readRegister(offset: u32) u32 {
     @panic("APIC not initialized");
 }
 
+// Write to APIC register without readback (for SIPI safety)
+fn writeRegisterNoReadback(offset: u32, value: u32) void {
+    // Minimal validation for SIPI critical path
+    if (offset > MAX_APIC_OFFSET or (offset & 0x3) != 0) {
+        @panic("Invalid APIC register offset");
+    }
+
+    if (lapic_addr) |addr| {
+        const reg_ptr = @as([*]volatile u32, @ptrFromInt(@intFromPtr(addr) + offset));
+
+        // Memory barrier before write
+        asm volatile ("mfence" ::: "memory");
+
+        // Write without readback
+        reg_ptr[0] = value;
+
+        // Memory barrier after write
+        asm volatile ("mfence" ::: "memory");
+    } else {
+        @panic("APIC not initialized");
+    }
+}
+
 // Write to APIC register with comprehensive validation
 pub fn writeRegister(offset: u32, value: u32) void {
     // Debug for ICR writes
@@ -284,34 +307,53 @@ pub fn writeRegister(offset: u32, value: u32) void {
         // Memory barrier before write
         asm volatile ("mfence" ::: "memory");
 
-        // For SIPI, add pre-write delay and serialization
+        // For SIPI, add pre-write serialization
         if (offset == APIC_ICR_LOW and (value & 0x700) == 0x600) { // Check for Startup IPI
-            serial.println("[APIC] About to write SIPI, serializing...", .{});
-
-            // Ensure interrupts are disabled
-            const flags = asm volatile ("pushfq; popq %[result]; cli"
-                : [result] "=r" (-> u64),
-            );
-            const interrupts_were_enabled = (flags & 0x200) != 0;
-            if (interrupts_were_enabled) {
-                serial.println("[APIC] WARNING: Interrupts were enabled during SIPI, now disabled", .{});
-            }
-
-            // Serialize execution to ensure all previous operations complete
-            asm volatile ("cpuid" ::: "eax", "ebx", "ecx", "edx", "memory");
+            // Simple memory barrier is sufficient - avoid cpuid which can fault
+            asm volatile ("mfence" ::: "memory");
         }
 
-        // Write the value to the APIC register
-        reg_ptr[0] = value;
-
-        // For SIPI specifically, add extra synchronization
+        // For SIPI, use special handling without readback
         if (offset == APIC_ICR_LOW and (value & 0x700) == 0x600) {
+            // CRITICAL: Disable interrupts during SIPI write
+            const flags = asm volatile ("pushfq; popq %[flags]; cli"
+                : [flags] "=r" (-> u64),
+            );
+            defer {
+                // Restore interrupt flag
+                if (flags & 0x200 != 0) {
+                    asm volatile ("sti" ::: "memory");
+                }
+            }
+
+            // Also disable NMIs during critical SIPI write
+            const saved_cmos = asm volatile ("inb $0x70, %[result]"
+                : [result] "={al}" (-> u8),
+            );
+            asm volatile ("outb %[val], $0x70"
+                :
+                : [val] "{al}" (saved_cmos | 0x80),
+            );
+            defer {
+                // Re-enable NMIs
+                asm volatile ("outb %[val], $0x70"
+                    :
+                    : [val] "{al}" (saved_cmos & 0x7F),
+                );
+            }
+
+            // Write the value without any readback
+            reg_ptr[0] = value;
+
             // Strong memory barriers to ensure write completes
             asm volatile ("mfence; lfence; sfence" ::: "memory");
 
-            // Read back to ensure write completed
-            const readback = reg_ptr[0];
-            serial.println("[APIC] SIPI write completed, readback: 0x{x}", .{readback});
+            // DO NOT read back ICR after SIPI - it can cause faults
+            // Intel SDM says ICR might be busy and not readable
+            serial.println("[APIC] SIPI write completed (no readback for safety)", .{});
+        } else {
+            // Normal register write
+            reg_ptr[0] = value;
         }
 
         // Memory barrier after write
@@ -327,17 +369,8 @@ pub fn writeRegister(offset: u32, value: u32) void {
                 asm volatile ("pause" ::: "memory");
             }
 
-            // Direct ESR check without recursion
-            if (lapic_addr) |lapic| {
-                const esr_ptr = @as([*]volatile u32, @ptrFromInt(@intFromPtr(lapic) + APIC_ESR));
-                _ = esr_ptr[0]; // Read ESR
-                esr_ptr[0] = 0; // Write to update ESR
-                asm volatile ("mfence" ::: "memory");
-                const esr_after = esr_ptr[0];
-                if (esr_after != 0) {
-                    serial.println("[APIC] ERROR: ESR=0x{x} after SIPI write!", .{esr_after});
-                }
-            }
+            // Skip ESR check during SIPI - it can cause issues
+            // The ESR can be checked later after AP startup
 
             // Debug for SIPI
             serial.println("[APIC] SIPI handling complete", .{});
@@ -569,10 +602,15 @@ pub fn sendIPI(dest_apic_id: u8, vector: u8, delivery_mode: IpiDeliveryMode, lev
             }
         }
     } else {
-        // For Startup IPIs, just ensure ICR is not busy before writing
-        // Some CPUs don't clear the delivery status bit properly for SIPI
-        const icr_before = readRegister(APIC_ICR_LOW);
-        serial.println("[APIC] Before SIPI: ICR=0x{x}", .{icr_before});
+        // For Startup IPIs, skip ICR read as it can cause faults
+        // Some CPUs don't handle ICR reads well during SIPI sequence
+        serial.println("[APIC] Skipping ICR check for SIPI (safety)", .{});
+
+        // Just add a small delay to ensure any previous operation completed
+        var delay: u32 = 0;
+        while (delay < 1000) : (delay += 1) {
+            asm volatile ("pause" ::: "memory");
+        }
     }
 
     // Write destination (high 32 bits) if not using shorthand
@@ -589,6 +627,25 @@ pub fn sendIPI(dest_apic_id: u8, vector: u8, delivery_mode: IpiDeliveryMode, lev
     if (delivery_mode == .Init or delivery_mode == .Startup) {
         // Ensure all previous memory operations are complete
         asm volatile ("mfence; lfence" ::: "memory");
+
+        // For SIPI specifically, disable NMIs
+        if (delivery_mode == .Startup) {
+            // Disable NMIs during SIPI to prevent any interference
+            const saved_cmos = asm volatile ("inb $0x70, %[result]"
+                : [result] "={al}" (-> u8),
+            );
+            asm volatile ("outb %[val], $0x70"
+                :
+                : [val] "{al}" (saved_cmos | 0x80),
+            );
+            defer {
+                // Re-enable NMIs after SIPI
+                asm volatile ("outb %[val], $0x70"
+                    :
+                    : [val] "{al}" (saved_cmos & 0x7F),
+                );
+            }
+        }
     }
 
     // Write command (low 32 bits) - this sends the IPI
@@ -623,10 +680,13 @@ pub fn sendIPI(dest_apic_id: u8, vector: u8, delivery_mode: IpiDeliveryMode, lev
         serial.println("[APIC] Post-SIPI delay completed", .{});
     }
 
-    // Debug: Check if IPI was sent
-    if (delivery_mode == .Startup or delivery_mode == .Init) {
+    // Debug: Log IPI completion (but don't read ICR for SIPI)
+    if (delivery_mode == .Init) {
         const final_icr = readRegister(APIC_ICR_LOW);
-        serial.println("[APIC] After IPI write: vector=0x{x}, dest={}, ICR now=0x{x}", .{ vector, dest_apic_id, final_icr });
+        serial.println("[APIC] After INIT write: vector=0x{x}, dest={}, ICR now=0x{x}", .{ vector, dest_apic_id, final_icr });
+    } else if (delivery_mode == .Startup) {
+        // Don't read ICR after SIPI - it can cause faults
+        serial.println("[APIC] After SIPI write: vector=0x{x}, dest={} (no ICR read)", .{ vector, dest_apic_id });
     }
 }
 

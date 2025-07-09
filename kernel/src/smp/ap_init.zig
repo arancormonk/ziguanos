@@ -8,6 +8,7 @@ const pmm = @import("../memory/pmm.zig");
 const per_cpu = @import("per_cpu.zig");
 const cpu_local = @import("cpu_local.zig");
 const ap_debug = @import("ap_debug.zig");
+const ap_sync = @import("ap_sync.zig");
 const spinlock = @import("../lib/spinlock.zig");
 const serial = @import("../drivers/serial.zig");
 const timer = @import("../x86_64/timer.zig");
@@ -39,6 +40,10 @@ var startup_lock = spinlock.SpinLock{};
 // Simple verification counter that APs increment
 pub var ap_alive_counter: u32 = 0;
 
+// AP startup barrier for synchronization
+var ap_startup_barrier: ap_sync.ApBarrier = undefined;
+var barrier_initialized: bool = false;
+
 // Trampoline location in low memory
 // Note: Some systems clear memory during INIT-SIPI-SIPI
 // Try 0x8000 which is in conventional memory
@@ -61,20 +66,24 @@ pub const ApError = enum(u32) {
 };
 
 // Offsets in trampoline data section (from trampoline.S)
-// These are relative to ap_startup_data label
+// These are relative to ap_startup_data label (calculated from symbol table)
 const TrampolineOffsets = struct {
     // ap_gdt starts at ap_startup_data + 0 (with .align 16)
     const gdt_offset: usize = 0;
-    // ap_gdtr starts after 5 quads (40 bytes) + alignment to 16
-    const gdtr_offset: usize = 48; // 40 rounded up to next 16-byte boundary
-    // ap_pml4_addr starts after gdtr (6 bytes) + alignment to 8
-    const pml4_addr_offset: usize = 56; // 48 + 6 rounded up to next 8-byte boundary
+    // ap_gdtr starts after GDT (5 entries * 8 bytes = 40 bytes) + alignment
+    const gdtr_offset: usize = 0x30; // 48 bytes from ap_startup_data
+    // ap_idt starts after gdtr (6 bytes) + alignment
+    const idt_offset: usize = 0x40; // 64 bytes from ap_startup_data
+    // ap_idtr starts after IDT (256 entries * 8 bytes = 2048 bytes)
+    const idtr_offset: usize = 0x840; // 2112 bytes from ap_startup_data
+    // ap_pml4_addr starts after idtr (6 bytes) + alignment to 8
+    const pml4_addr_offset: usize = 0x848; // 2120 bytes from ap_startup_data
     // ap_entry_point starts after pml4_addr (4 bytes) + alignment to 8
-    const entry_point_offset: usize = 64; // 56 + 4 rounded up to next 8-byte boundary
+    const entry_point_offset: usize = 0x850; // 2128 bytes from ap_startup_data
     // ap_cpu_id starts after entry_point (8 bytes) + alignment to 4
-    const cpu_id_offset: usize = 72; // 64 + 8, already 4-byte aligned
+    const cpu_id_offset: usize = 0x858; // 2136 bytes from ap_startup_data
     // ap_stack_array starts after cpu_id (4 bytes) + alignment to 8
-    const stack_array_offset: usize = 80; // 72 + 4 rounded up to next 8-byte boundary
+    const stack_array_offset: usize = 0x860; // 2144 bytes from ap_startup_data
 };
 
 /// Initialize an Application Processor
@@ -204,8 +213,8 @@ pub fn initAP(cpu_id: u32, apic_id: u8) !void {
         : "memory"
     );
 
-    // Add a write barrier to ensure all memory writes are visible to other CPUs
-    asm volatile ("mfence" ::: "memory");
+    // Add a full memory barrier to ensure all memory writes are visible to other CPUs
+    ap_sync.memoryBarrier();
 
     // Clear the debug memory region (0x6000) before sending INIT-SIPI-SIPI
     // This ensures we can detect if the AP actually writes to it
@@ -250,15 +259,41 @@ pub fn initAP(cpu_id: u32, apic_id: u8) !void {
     };
 
     // Wait for AP to signal ready
-    const start_time = timer.getUptime();
-    var last_check_time = start_time;
+    // Use TSC directly since interrupts are disabled
+    const tsc_freq = timer.getTSCFrequency();
+    if (tsc_freq == 0) {
+        serial.println("[SMP] ERROR: TSC not calibrated, using busy wait", .{});
+        // Fallback to simple busy wait
+        var wait_count: u32 = 0;
+        while (@atomicLoad(u32, &startup_state.ap_ready_count, .acquire) < cpu_id and wait_count < 100_000_000) {
+            asm volatile ("pause");
+            wait_count += 1;
+        }
+        if (wait_count >= 100_000_000) {
+            serial.println("[SMP] AP {} startup timeout (busy wait)", .{cpu_id});
+            ap_debug.recordApError(cpu_id, @intFromEnum(ApError.StartupTimeout), ap_debug.DebugFlags.TIMEOUT);
+            @atomicStore(u32, &startup_state.ap_boot_error, @intFromEnum(ApError.StartupTimeout), .release);
+            return error.StartupTimeout;
+        }
+        serial.println("[SMP] AP {} started successfully", .{cpu_id});
+        return;
+    }
+
+    const start_tsc = timer.readTSC();
+    var last_check_tsc = start_tsc;
     var debug_checks: u32 = 0;
+
+    // Calculate TSC ticks for timeouts
+    const tsc_per_ms = tsc_freq / 1000;
+    const check_interval_ticks = tsc_per_ms * 10; // 10ms
+    const timeout_ticks = tsc_per_ms * AP_STARTUP_TIMEOUT_MS;
+
     while (@atomicLoad(u32, &startup_state.ap_ready_count, .acquire) < cpu_id) {
         // Check for trampoline debug updates every 10ms
-        const current_time = timer.getUptime();
-        if (current_time - last_check_time >= 10) {
+        const current_tsc = timer.readTSC();
+        if (current_tsc - last_check_tsc >= check_interval_ticks) {
             ap_debug.checkTrampolineDebug();
-            last_check_time = current_time;
+            last_check_tsc = current_tsc;
             debug_checks += 1;
 
             // Also check the debug location directly every 100ms
@@ -285,7 +320,7 @@ pub fn initAP(cpu_id: u32, apic_id: u8) !void {
             }
         }
 
-        if (current_time - start_time > AP_STARTUP_TIMEOUT_MS) {
+        if (current_tsc - start_tsc > timeout_ticks) {
             // Check debug state for more detailed info
             const status = ap_debug.getApStatus(cpu_id);
             serial.println("[SMP] AP {} startup timeout at stage: {s}", .{ cpu_id, if (status) |s| ap_debug.stageName(s.stage) else "Unknown" });
@@ -395,7 +430,7 @@ fn setupTrampoline() !void {
     } else {
         // Fallback to known size
         serial.println("[SMP] WARNING: Cannot calculate size from addresses, using known size", .{});
-        trampoline_size = 0xbb0; // 2992 bytes - from nm output
+        trampoline_size = 0xbd0; // 3024 bytes - from nm output
     }
 
     serial.println("[SMP] Final trampoline size: {} bytes", .{trampoline_size});
@@ -427,7 +462,25 @@ fn setupTrampoline() !void {
     // Memory barrier to ensure copy completes
     asm volatile ("mfence" ::: "memory");
 
-    serial.println("[SMP] Trampoline code copied to 0x{x} ({} bytes)", .{ TRAMPOLINE_ADDR, trampoline_size });
+    // Flush the data cache and instruction cache for the trampoline area
+    // This is critical - the CPU might have stale instruction cache entries
+    var cache_addr: u64 = TRAMPOLINE_ADDR;
+    while (cache_addr < TRAMPOLINE_ADDR + trampoline_size) : (cache_addr += 64) {
+        // clflush flushes the cache line containing the linear address
+        asm volatile ("clflush (%[addr])"
+            :
+            : [addr] "r" (cache_addr),
+            : "memory"
+        );
+    }
+
+    // Ensure all cache flushes complete
+    asm volatile ("mfence" ::: "memory");
+
+    // On some CPUs, we also need to serialize to ensure instruction cache coherency
+    asm volatile ("cpuid" ::: "eax", "ebx", "ecx", "edx", "memory");
+
+    serial.println("[SMP] Trampoline code copied to 0x{x} ({} bytes), caches flushed", .{ TRAMPOLINE_ADDR, trampoline_size });
 
     // Verify the copy was successful
     const first_bytes = dst[0..16];
@@ -457,7 +510,7 @@ fn setupTrampoline() !void {
                 (@as(u32, dst[i + 4]) << 8) |
                 (@as(u32, dst[i + 5]) << 16) |
                 (@as(u32, dst[i + 6]) << 24);
-            serial.println("[SMP] lgdt operand address: 0x{x} (should be ~0x{x} for correct relocation)", .{ lgdt_addr, TRAMPOLINE_ADDR + 0x160 });
+            serial.println("[SMP] lgdt operand address: 0x{x} (should be ~0x{x} for correct relocation)", .{ lgdt_addr, TRAMPOLINE_ADDR + 0x170 + 0x30 });
 
             // Fix the lgdt operand to use the correct address
             const correct_gdtr_addr = TRAMPOLINE_ADDR + ap_startup_data_offset + TrampolineOffsets.gdtr_offset;
@@ -471,6 +524,34 @@ fn setupTrampoline() !void {
     }
     if (lgdt_offset == null) {
         serial.println("[SMP] WARNING: Could not find lgdt instruction!", .{});
+    }
+
+    // Look for the lidt instruction (0x0F 0x01 0x1D) to fix its operand too
+    serial.println("[SMP] Searching for lidt instruction in trampoline...", .{});
+    var lidt_offset: ?usize = null;
+    for (0..trampoline_size - 6) |i| {
+        if (dst[i] == 0x0F and dst[i + 1] == 0x01 and dst[i + 2] == 0x1D) {
+            lidt_offset = i;
+            serial.println("[SMP] Found lidt at offset 0x{x}", .{i});
+            // The next 4 bytes should be the address of the IDTR
+            const lidt_addr = @as(u32, dst[i + 3]) |
+                (@as(u32, dst[i + 4]) << 8) |
+                (@as(u32, dst[i + 5]) << 16) |
+                (@as(u32, dst[i + 6]) << 24);
+            serial.println("[SMP] lidt operand address: 0x{x}", .{lidt_addr});
+
+            // Fix the lidt operand to use the correct address
+            const correct_idtr_addr = TRAMPOLINE_ADDR + ap_startup_data_offset + TrampolineOffsets.idtr_offset;
+            dst[i + 3] = @truncate(correct_idtr_addr & 0xFF);
+            dst[i + 4] = @truncate((correct_idtr_addr >> 8) & 0xFF);
+            dst[i + 5] = @truncate((correct_idtr_addr >> 16) & 0xFF);
+            dst[i + 6] = @truncate((correct_idtr_addr >> 24) & 0xFF);
+            serial.println("[SMP] Fixed lidt operand to: 0x{x}", .{correct_idtr_addr});
+            break;
+        }
+    }
+    if (lidt_offset == null) {
+        serial.println("[SMP] WARNING: Could not find lidt instruction!", .{});
     }
 
     // Verify the lgdt fix by reading it back
@@ -508,6 +589,24 @@ fn setupTrampoline() !void {
 
     serial.println("[SMP] Fixed GDTR: limit=0x{x}, base=0x{x}", .{ gdt_limit, gdt_physical_addr });
 
+    // Fix up the IDTR base address in the trampoline
+    const idtr_offset = ap_startup_data_offset + TrampolineOffsets.idtr_offset;
+    const idtr_ptr = @as(*[6]u8, @ptrFromInt(TRAMPOLINE_ADDR + idtr_offset));
+
+    // The IDTR should point to the IDT at TRAMPOLINE_ADDR + ap_startup_data_offset + idt_offset
+    const idt_physical_addr = TRAMPOLINE_ADDR + ap_startup_data_offset + TrampolineOffsets.idt_offset;
+    const idt_limit: u16 = 2047; // 256 entries * 8 bytes - 1 = 0x7FF
+
+    // Write the correct IDTR (limit=0x7FF, base=physical address of IDT)
+    idtr_ptr[0] = @truncate(idt_limit & 0xFF);
+    idtr_ptr[1] = @truncate((idt_limit >> 8) & 0xFF);
+    idtr_ptr[2] = @truncate(idt_physical_addr & 0xFF);
+    idtr_ptr[3] = @truncate((idt_physical_addr >> 8) & 0xFF);
+    idtr_ptr[4] = @truncate((idt_physical_addr >> 16) & 0xFF);
+    idtr_ptr[5] = @truncate((idt_physical_addr >> 24) & 0xFF);
+
+    serial.println("[SMP] Fixed IDTR: limit=0x{x}, base=0x{x}", .{ idt_limit, idt_physical_addr });
+
     // Ensure all CPUs see the changes (memory barrier)
     asm volatile ("mfence" ::: "memory");
 
@@ -543,9 +642,9 @@ fn findStartupDataOffsetStatic(buffer: [*]const u8, size: usize) usize {
         }
     }
 
-    // If not found, use the expected offset
-    serial.println("[SMP] WARNING: Could not find GDT pattern, using default offset 0x130", .{});
-    return 0x130;
+    // If not found, use the expected offset (from symbol table)
+    serial.println("[SMP] WARNING: Could not find GDT pattern, using default offset 0x170", .{});
+    return 0x170; // 368 bytes from trampoline start
 }
 
 /// Find the ap_startup_data offset in the trampoline
@@ -555,7 +654,7 @@ fn findStartupDataOffset() usize {
     // - Code segment: 0x00CF9A000000FFFF
     // - Data segment: 0x00CF92000000FFFF
     const trampoline_ptr = @as([*]const u8, @ptrFromInt(TRAMPOLINE_ADDR));
-    const trampoline_size = 2880; // Updated to include IDT
+    const trampoline_size = 3024; // Total trampoline size including IDT
 
     // Search for the GDT pattern
     var offset: usize = 0;
@@ -570,9 +669,9 @@ fn findStartupDataOffset() usize {
         }
     }
 
-    // If not found, use the expected offset
-    serial.println("[SMP] WARNING: Could not find GDT pattern, using default offset 0x130", .{});
-    return 0x130;
+    // If not found, use the expected offset (from symbol table)
+    serial.println("[SMP] WARNING: Could not find GDT pattern, using default offset 0x170", .{});
+    return 0x170; // 368 bytes from trampoline start
 }
 
 /// Update trampoline data for specific CPU
@@ -656,8 +755,8 @@ fn updateTrampolineData(cpu_id: u32, stack_top: [*]u8, cpu_data: *per_cpu.CpuDat
     startup_state.ap_stack_top = stack_top;
     startup_state.ap_cpu_data = cpu_data;
 
-    // Ensure all writes are visible
-    asm volatile ("mfence" ::: "memory");
+    // Ensure all writes are visible with full memory barrier
+    ap_sync.memoryBarrier();
 
     return ap_startup_data_offset;
 }
@@ -760,6 +859,24 @@ fn sendInitSipiSipi(apic_id: u8) !void {
     asm volatile ("cli" ::: "memory");
     defer asm volatile ("sti" ::: "memory");
 
+    // Also disable NMIs to prevent any interruption during SIPI
+    // Save current CMOS address register state
+    const saved_cmos = asm volatile ("inb $0x70, %[result]"
+        : [result] "={al}" (-> u8),
+    );
+    // Set bit 7 to disable NMIs
+    asm volatile ("outb %[val], $0x70"
+        :
+        : [val] "{al}" (saved_cmos | 0x80),
+    );
+    defer {
+        // Re-enable NMIs on exit
+        asm volatile ("outb %[val], $0x70"
+            :
+            : [val] "{al}" (saved_cmos & 0x7F),
+        );
+    }
+
     // Clear debug marker locations before starting
     // Important: Don't clear the trampoline area (0x8000), only debug areas
     // NOTE: These addresses must be within mapped memory regions
@@ -854,6 +971,9 @@ fn sendInitSipiSipi(apic_id: u8) !void {
     serial.println("[SMP] Waiting 10ms after INIT...", .{});
     pitPollingDelay(10_000); // 10ms = 10,000 microseconds
 
+    // Additional synchronization delay
+    ap_sync.apStartupDelay(10_000);
+
     // Check ICR status after INIT
     const icr_after_init = apic.readRegister(0x300); // APIC_ICR_LOW
     serial.println("[SMP] ICR after INIT wait: 0x{x}", .{icr_after_init});
@@ -905,22 +1025,28 @@ fn sendInitSipiSipi(apic_id: u8) !void {
     // Some systems hang if SIPI is sent while certain operations are pending
     asm volatile ("mfence; lfence" ::: "memory");
 
-    // Send first SIPI with vector 0x05 (0x8000 >> 12)
-    // SIPI vector is the page number (address >> 12), so 0x05 = 0x8000
-    serial.println("[SMP] Sending first SIPI with vector 0x05 (starts at 0x8000)", .{});
+    // Send first SIPI with vector 0x08 (0x8000 >> 12)
+    // SIPI vector is the page number (address >> 12), so 0x08 = 0x8000
+    serial.println("[SMP] Sending first SIPI with vector 0x08 (starts at 0x8000)", .{});
 
     // WORKAROUND: Some systems require a small delay before SIPI
     busyWait(1000);
 
-    try apic.sendIPI(apic_id, 0x05, .Startup, .Assert, .Edge, .NoShorthand);
+    try apic.sendIPI(apic_id, 0x08, .Startup, .Assert, .Edge, .NoShorthand);
 
     // Wait 200us (0.2ms) between SIPIs as per Intel SDM
     serial.println("[SMP] Waiting 200us between SIPIs...", .{});
     pitPollingDelay(200); // Wait 200 microseconds
 
+    // Additional synchronization delay
+    ap_sync.apStartupDelay(5_000);
+
     // Send second SIPI
-    serial.println("[SMP] Sending second SIPI with vector 0x05", .{});
-    try apic.sendIPI(apic_id, 0x05, .Startup, .Assert, .Edge, .NoShorthand);
+    serial.println("[SMP] Sending second SIPI with vector 0x08", .{});
+    try apic.sendIPI(apic_id, 0x08, .Startup, .Assert, .Edge, .NoShorthand);
+
+    // Add a delay after second SIPI to ensure it completes and avoid race
+    ap_sync.apStartupDelay(50_000); // 50k pause cycles
 
     serial.println("[SMP] INIT-SIPI-SIPI sequence complete", .{});
 
@@ -929,10 +1055,10 @@ fn sendInitSipiSipi(apic_id: u8) !void {
     for (0..0x30) |i| {
         debug_region[i] = 0;
     }
-    asm volatile ("mfence" ::: "memory");
+    ap_sync.memoryBarrier();
 
     // Give AP a moment to start and check debug location immediately
-    busyWait(10_000); // Short wait
+    ap_sync.apStartupDelay(10_000); // Short wait
     const debug_ptr = @as(*align(1) volatile ap_debug.TrampolineDebug, @ptrFromInt(ap_debug.TRAMPOLINE_DEBUG_ADDR));
     serial.println("[SMP] Immediate debug check at 0x7000:", .{});
     serial.print("[SMP]   First 16 bytes at 0x6FF0: ", .{});
@@ -984,6 +1110,11 @@ pub fn startAllAPs(processor_info: []const per_cpu.ProcessorInfo) !void {
     // Initialize debug state
     ap_debug.init(@intCast(processor_info.len - 1));
 
+    // Initialize AP startup barrier
+    const ap_count = @as(u32, @intCast(processor_info.len - 1));
+    ap_startup_barrier = ap_sync.ApBarrier.init(ap_count);
+    barrier_initialized = true;
+
     // Reset startup state
     @atomicStore(u32, &startup_state.ap_ready_count, 0, .release);
     @atomicStore(u32, &startup_state.ap_boot_error, 0, .release);
@@ -1011,6 +1142,9 @@ pub fn startAllAPs(processor_info: []const per_cpu.ProcessorInfo) !void {
         ap_debug.dumpDebugInfo();
     }
 
+    // Release the startup barrier to let APs proceed
+    ap_startup_barrier.release();
+
     // Signal all APs to proceed
     @atomicStore(bool, &startup_state.proceed_signal, true, .release);
 
@@ -1035,11 +1169,26 @@ pub fn startAllAPs(processor_info: []const per_cpu.ProcessorInfo) !void {
 export fn apMainEntry(cpu_id: u32) callconv(.C) noreturn {
     // This is called with interrupts disabled
 
+    // Add a small delay to ensure BSP has completed SIPI and released locks
+    ap_sync.apStartupDelay(100_000); // 100k pause cycles
+
     // Increment alive counter to verify AP is executing
     _ = @atomicRmw(u32, &ap_alive_counter, .Add, 1, .seq_cst);
 
     // Update debug state
     ap_debug.updateApStage(cpu_id, .KernelEntry);
+
+    // Wait at startup barrier before accessing shared resources
+    if (barrier_initialized) {
+        const wait_result = ap_startup_barrier.wait(10_000_000); // ~10M cycles timeout
+        if (!wait_result) {
+            // Timeout waiting at barrier
+            ap_debug.recordApError(cpu_id, 0xBAD1, ap_debug.DebugFlags.TIMEOUT);
+            while (true) {
+                asm volatile ("hlt");
+            }
+        }
+    }
 
     // Get the correct per-CPU data for this CPU
     const cpu_data = &per_cpu.cpu_data_array[cpu_id];
