@@ -215,7 +215,7 @@ pub fn build(b: *std.Build) void {
 
     // Clean step
     const clean_cmd = b.addSystemCommand(&[_][]const u8{
-        "rm", "-rf", "zig-out", "zig-cache", "serial.log", "qemu.log",
+        "rm", "-rf", "zig-out", ".zig-cache", "serial.log", "qemu.log",
     });
 
     const clean_step = b.step("clean", "Clean build artifacts");
