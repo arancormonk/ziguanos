@@ -518,70 +518,26 @@ fn setupTrampoline() !void {
     // Find the ap_startup_data offset first
     const ap_startup_data_offset = findStartupDataOffsetStatic(@as([*]const u8, @ptrCast(@volatileCast(dst))), trampoline_size);
 
-    // Look for the lgdt instruction (0x0F 0x01 0x16) to verify the offset is correct
-    serial.println("[SMP] Searching for lgdt instruction in trampoline...", .{});
-    var lgdt_offset: ?usize = null;
-    for (0..trampoline_size - 6) |i| {
-        if (dst[i] == 0x0F and dst[i + 1] == 0x01 and dst[i + 2] == 0x16) {
-            lgdt_offset = i;
-            serial.println("[SMP] Found lgdt at offset 0x{x}", .{i});
-            // The next 4 bytes should be the address of the GDTR
-            const lgdt_addr = @as(u32, dst[i + 3]) |
-                (@as(u32, dst[i + 4]) << 8) |
-                (@as(u32, dst[i + 5]) << 16) |
-                (@as(u32, dst[i + 6]) << 24);
-            serial.println("[SMP] lgdt operand address: 0x{x} (should be ~0x{x} for correct relocation)", .{ lgdt_addr, TRAMPOLINE_ADDR + 0x170 + 0x30 });
+    // No need to patch lgdt instruction anymore since we'll patch the GDTR directly
+    serial.println("[SMP] GDTR and IDTR will be patched directly in the data section", .{});
 
-            // Fix the lgdt operand to use the correct address
-            const correct_gdtr_addr = TRAMPOLINE_ADDR + ap_startup_data_offset + TrampolineOffsets.gdtr_offset;
-            dst[i + 3] = @truncate(correct_gdtr_addr & 0xFF);
-            dst[i + 4] = @truncate((correct_gdtr_addr >> 8) & 0xFF);
-            dst[i + 5] = @truncate((correct_gdtr_addr >> 16) & 0xFF);
-            dst[i + 6] = @truncate((correct_gdtr_addr >> 24) & 0xFF);
-            serial.println("[SMP] Fixed lgdt operand to: 0x{x}", .{correct_gdtr_addr});
-            break;
-        }
-    }
-    if (lgdt_offset == null) {
-        serial.println("[SMP] WARNING: Could not find lgdt instruction!", .{});
-    }
+    // Also patch the IDT entries to point to the exception handler
+    const exception_handler_addr = TRAMPOLINE_ADDR + findExceptionHandlerOffset(@as([*]const u8, @ptrCast(@volatileCast(dst))), trampoline_size);
+    const idt_offset = ap_startup_data_offset + TrampolineOffsets.idt_offset;
 
-    // Look for the lidt instruction (0x0F 0x01 0x1D) to fix its operand too
-    serial.println("[SMP] Searching for lidt instruction in trampoline...", .{});
-    var lidt_offset: ?usize = null;
-    for (0..trampoline_size - 6) |i| {
-        if (dst[i] == 0x0F and dst[i + 1] == 0x01 and dst[i + 2] == 0x1D) {
-            lidt_offset = i;
-            serial.println("[SMP] Found lidt at offset 0x{x}", .{i});
-            // The next 4 bytes should be the address of the IDTR
-            const lidt_addr = @as(u32, dst[i + 3]) |
-                (@as(u32, dst[i + 4]) << 8) |
-                (@as(u32, dst[i + 5]) << 16) |
-                (@as(u32, dst[i + 6]) << 24);
-            serial.println("[SMP] lidt operand address: 0x{x}", .{lidt_addr});
-
-            // Fix the lidt operand to use the correct address
-            const correct_idtr_addr = TRAMPOLINE_ADDR + ap_startup_data_offset + TrampolineOffsets.idtr_offset;
-            dst[i + 3] = @truncate(correct_idtr_addr & 0xFF);
-            dst[i + 4] = @truncate((correct_idtr_addr >> 8) & 0xFF);
-            dst[i + 5] = @truncate((correct_idtr_addr >> 16) & 0xFF);
-            dst[i + 6] = @truncate((correct_idtr_addr >> 24) & 0xFF);
-            serial.println("[SMP] Fixed lidt operand to: 0x{x}", .{correct_idtr_addr});
-            break;
-        }
+    // Patch all 32 exception entries in the IDT
+    for (0..32) |i| {
+        const entry_offset = idt_offset + (i * 8);
+        const entry_ptr = @as(*[8]u8, @ptrFromInt(TRAMPOLINE_ADDR + entry_offset));
+        // Set offset 15:0
+        entry_ptr[0] = @truncate(exception_handler_addr & 0xFF);
+        entry_ptr[1] = @truncate((exception_handler_addr >> 8) & 0xFF);
+        // Selector and flags are already set
+        // Set offset 31:16 (for 32-bit mode, upper 16 bits of offset)
+        entry_ptr[6] = @truncate((exception_handler_addr >> 16) & 0xFF);
+        entry_ptr[7] = @truncate((exception_handler_addr >> 24) & 0xFF);
     }
-    if (lidt_offset == null) {
-        serial.println("[SMP] WARNING: Could not find lidt instruction!", .{});
-    }
-
-    // Verify the lgdt fix by reading it back
-    if (lgdt_offset) |off| {
-        const verify_addr = @as(u32, dst[off + 3]) |
-            (@as(u32, dst[off + 4]) << 8) |
-            (@as(u32, dst[off + 5]) << 16) |
-            (@as(u32, dst[off + 6]) << 24);
-        serial.println("[SMP] Verified lgdt operand: 0x{x}", .{verify_addr});
-    }
+    serial.println("[SMP] Patched IDT entries to point to exception handler at 0x{x}", .{exception_handler_addr});
 
     // Make the trampoline area executable (remove NX bit)
     paging.makeRegionExecutable(TRAMPOLINE_ADDR, trampoline_size) catch |err| {
@@ -634,6 +590,21 @@ fn setupTrampoline() !void {
 
     serial.println("[SMP] Fixed IDTR: limit=0x{x}, base=0x{x}", .{ idt_limit, idt_physical_addr });
 
+    // Verify the GDTR and IDTR are correctly set
+    serial.println("[SMP] Verifying GDTR at offset 0x{x}:", .{gdtr_offset});
+    serial.print("[SMP]   GDTR bytes: ", .{});
+    for (gdtr_ptr.*) |byte| {
+        serial.print("{x:0>2} ", .{byte});
+    }
+    serial.println("", .{});
+
+    serial.println("[SMP] Verifying IDTR at offset 0x{x}:", .{idtr_offset});
+    serial.print("[SMP]   IDTR bytes: ", .{});
+    for (idtr_ptr.*) |byte| {
+        serial.print("{x:0>2} ", .{byte});
+    }
+    serial.println("", .{});
+
     // CRITICAL: Also flush the debug memory regions that AP will write to
     // This prevents cache coherency issues between BSP and AP
     serial.println("[SMP] Flushing debug memory regions for cache coherency", .{});
@@ -664,6 +635,34 @@ fn setupTrampoline() !void {
     if (verify_ptr[0] != 0xFA) { // Should start with cli
         serial.println("[SMP] ERROR: Trampoline corrupted immediately after setup!", .{});
     }
+}
+
+/// Find the exception handler offset in the trampoline
+fn findExceptionHandlerOffset(buffer: [*]const u8, size: usize) usize {
+    // Look for the exception handler pattern:
+    // movl $0xDEADBEEF, 0x6FF8
+    // This is: C7 05 F8 6F 00 00 EF BE AD DE
+    const pattern = [_]u8{ 0xC7, 0x05, 0xF8, 0x6F, 0x00, 0x00, 0xEF, 0xBE, 0xAD, 0xDE };
+
+    var offset: usize = 0;
+    while (offset + pattern.len <= size) : (offset += 1) {
+        var match = true;
+        for (pattern, 0..) |byte, i| {
+            if (buffer[offset + i] != byte) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            serial.println("[SMP] Found exception handler at offset 0x{x}", .{offset});
+            return offset;
+        }
+    }
+
+    // If not found, assume it's near the beginning of protected mode section
+    // The handler is defined right before ap_pm_entry
+    serial.println("[SMP] WARNING: Could not find exception handler pattern, using estimated offset", .{});
+    return 0x6F; // Approximate offset based on assembly listing
 }
 
 /// Find the ap_startup_data offset in a buffer

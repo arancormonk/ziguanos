@@ -58,13 +58,13 @@ ap_rm_entry:
 
     # Debug writes to track real mode entry
     movl $0x12345678, 0x6000       # Magic
-    movl (ap_cpu_id - ap_trampoline_start + 0x8000), %eax
+    movl (ap_cpu_id - ap_trampoline_start + 0x8000), %eax  # Load CPU ID from data section
     movl %eax, 0x6004              # CPU ID
     movb $1, 0x6008                # Stage = RealMode16
     movb $0, 0x6009                # Error = 0
 
     # Load GDT pointer using absolute addressing
-    # GDT descriptor will be placed at 0x8000 + ap_gdtr offset
+    # The GDTR is located at a fixed offset from trampoline start
     lgdt (ap_gdtr - ap_trampoline_start + 0x8000)
 
     # CRITICAL: Add serialization after lgdt to ensure it completes
@@ -137,7 +137,7 @@ ap_pm_entry:
 
     # Debug writes for protected mode stage
     movl $0x12345678, 0x6000       # Magic
-    movl (ap_cpu_id - ap_trampoline_start + 0x8000), %eax
+    movl (ap_cpu_id - ap_trampoline_start + 0x8000), %eax  # Load CPU ID from data section
     movl %eax, 0x6004              # CPU ID
     movb $2, 0x6008                # Stage = ProtectedMode32
     movb $0, 0x6009                # Error = 0
@@ -188,7 +188,7 @@ ap_lm_entry:
 
     # Write debug info: LongMode64 stage (3)
     movl $0x12345678, 0x6000       # Magic
-    movl (ap_cpu_id - ap_trampoline_start + 0x8000), %eax
+    movl (ap_cpu_id - ap_trampoline_start + 0x8000), %eax  # Load CPU ID from data section
     movl %eax, 0x6004              # CPU ID
     movb $3, 0x6008                # Stage = LongMode64
     movb $0, 0x6009                # Error = 0
@@ -204,14 +204,14 @@ ap_lm_entry:
     mfence
 
     # Get CPU ID from startup data
-    movl (ap_cpu_id - ap_trampoline_start + 0x8000), %edi
+    movl (ap_cpu_id - ap_trampoline_start + 0x8000), %edi  # Load CPU ID from data section
 
     # Load stack pointer for this CPU
     # Stack addresses are stored in an array starting at ap_stack_array
     mov %edi, %eax
     shl $3, %eax       # Multiply by 8 (size of pointer)
-    lea (ap_stack_array - ap_trampoline_start + 0x8000), %rbx
-    mov (%rbx,%rax), %rsp
+    lea (ap_stack_array - ap_trampoline_start + 0x8000), %rcx
+    mov (%rcx,%rax), %rsp
 
     # Store stack pointer as debug value
     mov %rsp, 0x6010               # Debug value field
@@ -242,18 +242,19 @@ ap_gdt_end:
 .align 16
 ap_gdtr:
     .word ap_gdt_end - ap_gdt - 1  # Limit
-    .long ap_gdt - ap_trampoline_start + 0x8000  # Base (physical address)
+    .long 0  # Base will be patched by BSP at runtime
 
 # Minimal IDT with simple exception handler
 .align 16
 ap_idt:
     # First 32 entries point to simple handler (exceptions)
+    # The BSP will patch these with the correct offset
     .rept 32
-    .word ap_exception_handler - ap_trampoline_start + 0x8000  # Offset 15:0
+    .word 0  # Offset 15:0 - will be patched by BSP
     .word 0x08                     # Code segment selector
     .byte 0                        # IST (not used in 32-bit)
     .byte 0x8E                     # Type: 32-bit interrupt gate, DPL=0, Present
-    .word 0                        # Offset 31:16 (high bits zero for 32-bit)
+    .word 0                        # Offset 31:16 - will be patched by BSP
     .endr
     # Remaining entries are null
     .fill 224, 8, 0
@@ -263,7 +264,7 @@ ap_idt_end:
 .align 16
 ap_idtr:
     .word ap_idt_end - ap_idt - 1  # Limit
-    .long ap_idt - ap_trampoline_start + 0x8000  # Base (physical address)
+    .long 0  # Base will be patched by BSP at runtime
 
 # Variables populated by BSP
 .align 8
