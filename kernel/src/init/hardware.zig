@@ -12,7 +12,7 @@ const uefi_boot = @import("../boot/uefi_boot.zig");
 const allocator = @import("../memory/allocator.zig");
 const per_cpu = @import("../smp/per_cpu.zig");
 const cpu_local = @import("../smp/cpu_local.zig");
-const smp_test = @import("../smp/test.zig");
+const smp_test = @import("../smp/tests.zig");
 const ap_init = @import("../smp/ap_init.zig");
 const error_utils = @import("../lib/error_utils.zig");
 

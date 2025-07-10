@@ -283,6 +283,7 @@ pub fn apMain(cpu_data: *CpuData) noreturn {
 ### Step 4.1: IPI Management ✅ COMPLETED
 
 **Location**: IPI functionality is integrated across multiple modules:
+
 - `kernel/src/x86_64/apic.zig` - Core IPI sending functionality
 - `kernel/src/smp/ap_entry.zig` - IPI handling in AP idle loop
 - `kernel/src/smp/per_cpu.zig` - IPI pending flags
@@ -290,6 +291,7 @@ pub fn apMain(cpu_data: *CpuData) noreturn {
 **Current Status**: Full IPI infrastructure is implemented and functional.
 
 **Completed Features**:
+
 - ✅ IPI sending via APIC (`apic.sendIPI()`) with:
   - Multiple delivery modes (Fixed, Init, Startup, NMI, etc.)
   - Destination modes (Physical, Logical)
@@ -301,6 +303,7 @@ pub fn apMain(cpu_data: *CpuData) noreturn {
 - ✅ Proper synchronization with memory barriers
 
 **Implementation Details**:
+
 - IPI sending uses ICR (Interrupt Command Register) with proper status checking
 - Each CPU has a 32-bit `ipi_pending` field for up to 32 different IPI types
 - IPI handling occurs in the AP idle loop with interrupts disabled
@@ -334,6 +337,7 @@ pub const IpiHandler = struct {
 ### Step 4.2: TLB Shootdown ✅ COMPLETED
 
 **Location**: TLB shootdown functionality is integrated into:
+
 - `kernel/src/smp/ap_entry.zig` - TLB flush handling in APs
 - `kernel/src/smp/per_cpu.zig` - TLB flush pending flag
 - `kernel/src/x86_64/paging.zig` - TLB flush implementation
@@ -341,6 +345,7 @@ pub const IpiHandler = struct {
 **Current Status**: Full TLB shootdown mechanism is implemented.
 
 **Completed Features**:
+
 - ✅ TLB flush pending flag in per-CPU data
 - ✅ TLB flush handling in AP idle loop with proper synchronization
 - ✅ `paging.flushTLB()` function with full TLB invalidation
@@ -348,6 +353,7 @@ pub const IpiHandler = struct {
 - ✅ Memory barrier synchronization for coherency
 
 **Implementation Details**:
+
 ```zig
 // In AP idle loop:
 if (@atomicLoad(bool, &cpu_data.tlb_flush_pending, .acquire)) {
@@ -357,48 +363,54 @@ if (@atomicLoad(bool, &cpu_data.tlb_flush_pending, .acquire)) {
 ```
 
 **Note**: The current implementation performs full TLB flushes. Future optimizations could include:
+
 - Targeted single-page flushes using INVLPG
 - PCID support to avoid flushing kernel mappings
 - Address space tracking for selective CPU targeting
 
-### Step 4.3: Remote Function Calls ❌ NOT STARTED
+### Step 4.3: Remote Function Calls ⚠️ PARTIALLY COMPLETED
 
 **Location**: `kernel/src/smp/call_function.zig`
 
-Enable running functions on other CPUs:
+**Current Status**: Basic structure implemented but not fully integrated.
 
-```zig
-pub fn callFunctionSingle(cpu_id: u32, func: *const fn() void) !void {
-    // Queue function for target CPU
-    // Send IPI
-    // Wait for completion
-}
+**Completed**:
 
-pub fn callFunctionAll(func: *const fn() void) !void {
-    // Broadcast to all CPUs except self
-    // Wait for all to complete
-}
-```
+- Call function queue structure
+- IPI vector allocated (0xF2)
+- Basic queue management
 
-## Phase 5: CPU Synchronization Primitives ✅ PARTIALLY COMPLETED
+**TODO**:
+
+- Integration with AP idle loop for processing
+- Completion synchronization
+- Timeout handling
+
+## Phase 5: CPU Synchronization Primitives ✅ COMPLETED
 
 ### Step 5.1: Barriers ✅ COMPLETED
 
 **Location**: Barrier functionality is integrated into:
-- `kernel/src/smp/barriers.zig` - CPU synchronization barriers
-- `kernel/src/smp/ap_init.zig` - AP startup synchronization
-- `kernel/src/x86_64/barriers.zig` - Memory barrier primitives
 
-**Current Status**: Full barrier implementation with AP startup synchronization.
+- `kernel/src/smp/ap_sync.zig` - AP synchronization and memory barriers
+- `kernel/src/smp/ap_init.zig` - AP startup synchronization
+- `kernel/src/lib/barriers.zig` - General memory barrier primitives
+- `kernel/src/lib/semaphore.zig` - Counting semaphores and barriers
+
+**Current Status**: Full barrier and semaphore implementation.
 
 **Completed Features**:
+
 - ✅ AP startup barrier in `ap_init.zig`
 - ✅ Memory barriers (mfence, lfence, sfence) in x86_64 module
 - ✅ Serializing barriers for critical sections
 - ✅ Atomic counter-based synchronization
 - ✅ Proper memory ordering with acquire/release semantics
+- ✅ Counting semaphores in `semaphore.zig`
+- ✅ Barrier implementation using semaphores
 
 **Implementation Details**:
+
 ```zig
 // AP startup synchronization
 const expected_aps = topology.total_cpus - 1;
@@ -406,8 +418,6 @@ while (@atomicLoad(u32, &ap_ready_count, .acquire) < expected_aps) {
     // Wait with timeout
 }
 ```
-
-**Note**: While basic barriers are implemented, more advanced synchronization primitives (reader-writer locks, semaphores) are still needed for full SMP support.
 
 Implement synchronization barriers:
 
@@ -434,15 +444,15 @@ pub const Barrier = struct {
 };
 ```
 
-### Step 5.2: Read-Write Locks ❌ NOT STARTED
+### Step 5.2: Read-Write Locks ✅ COMPLETED
 
-**Location**: `kernel/src/smp/rwlock.zig`
+**Location**: `kernel/src/lib/rwlock.zig`
 
-**Current Status**: Not yet implemented.
+**Current Status**: Fully implemented.
 
-Implement reader-writer locks for better concurrency:
+Reader-writer locks with:
 
-1. Multiple readers, single writer
+1. Multiple readers, single writer support
 2. Writer priority to prevent starvation
 3. Interrupt-safe variants
 4. Debug mode with ownership tracking
@@ -452,11 +462,13 @@ Implement reader-writer locks for better concurrency:
 **Current Status**: Task structure placeholders exist in per-CPU data, but no scheduler implementation yet.
 
 **Completed**:
+
 - ✅ Task pointer placeholders in CpuData structure
 - ✅ Context switch counter infrastructure
 - ✅ AP idle loop ready for scheduler integration
 
 **TODO**:
+
 - ❌ Define Task structure
 - ❌ Implement run queues
 - ❌ Create scheduler algorithm
@@ -560,6 +572,7 @@ Implement stress tests:
 ## Implementation Timeline
 
 ### Completed Phases (Already Implemented)
+
 - ✅ **ACPI infrastructure and MADT parsing**
 - ✅ **Per-CPU infrastructure and GSBASE setup**
 - ✅ **AP trampoline and startup sequence**
@@ -567,6 +580,7 @@ Implement stress tests:
 - ✅ **Basic synchronization primitives**
 
 ### Remaining Work
+
 1. **Week 1-2**: Task structure and basic scheduler framework
 2. **Week 3-4**: Context switching and run queue management
 3. **Week 5-6**: Advanced synchronization primitives (rwlocks, semaphores)
@@ -625,6 +639,7 @@ When implementing each phase:
 ## Actual Implementation Files
 
 ### ACPI Subsystem (`kernel/src/drivers/acpi/`)
+
 - `acpi.zig` - Main ACPI interface and system management
 - `tables.zig` - ACPI table structure definitions
 - `rsdp.zig` - RSDP/RSDT/XSDT parsing and validation
@@ -632,15 +647,20 @@ When implementing each phase:
 - `checksum.zig` - Table checksum validation
 
 ### SMP Infrastructure (`kernel/src/smp/`)
+
 - `per_cpu.zig` - Per-CPU data structures and management (256 CPU support)
 - `cpu_local.zig` - CPU-local storage and GSBASE access
 - `trampoline.S` - 16-bit to 64-bit AP startup code
 - `ap_init.zig` - AP initialization coordinator with INIT-SIPI-SIPI
 - `ap_entry.zig` - 64-bit AP entry point and idle loop
 - `ap_debug.zig` - AP boot debugging infrastructure
-- `barriers.zig` - CPU synchronization barriers
+- `ap_sync.zig` - AP synchronization barriers
+- `lib/barriers.zig` - General memory barriers
+- `lib/rwlock.zig` - Read-write locks (IMPLEMENTED)
+- `lib/semaphore.zig` - Counting semaphores and barriers (IMPLEMENTED)
 
 ### Integration Points
+
 - `kernel/src/init/hardware_init.zig` - ACPI and SMP initialization
 - `kernel/src/x86_64/apic.zig` - Full APIC support with IPI functionality
 - `kernel/src/x86_64/paging.zig` - TLB flush implementation
@@ -703,15 +723,20 @@ When implementing each phase:
    - Memory barrier synchronization
    - Error handling and retry logic
 
+5. **CPU Synchronization Primitives** (Phase 5)
+   - Spinlock implementation with interrupt safety
+   - Read-write locks with writer priority
+   - Counting semaphores and barriers
+   - Memory barriers (mfence, lfence, sfence)
+   - AP startup synchronization
+
 ### ⚠️ Partially Completed Components
 
-1. **CPU Synchronization** (Phase 5)
-   - ✅ Basic spinlock implementation
-   - ✅ Memory barriers (mfence, lfence, sfence)
-   - ✅ AP startup barriers
-   - ❌ Read-write locks not implemented
-   - ❌ Semaphores not implemented
-   - ❌ Advanced synchronization primitives missing
+1. **Remote Function Calls** (Phase 4.3)
+   - ✅ Basic queue structure implemented
+   - ✅ IPI vector allocated
+   - ❌ Not integrated with AP idle loop
+   - ❌ Missing completion synchronization
 
 ### ❌ Not Started Components
 
@@ -732,22 +757,22 @@ When implementing each phase:
 
 ### Known Limitations
 
-1. **CPU Count**: Per-CPU system supports 256 CPUs, but trampoline stack array limited to 64 CPUs
-2. **Memory**: No NUMA awareness or node-local allocation
-3. **Scheduling**: No scheduler implementation - APs only run idle loops waiting for IPIs
-4. **Power**: No CPU hotplug, frequency scaling, or C-state management
-5. **Task/Process**: No Task structure or process management beyond placeholders
+1. **Memory**: No NUMA awareness or node-local allocation
+2. **Scheduling**: No scheduler implementation - APs only run idle loops waiting for IPIs
+3. **Power**: No CPU hotplug, frequency scaling, or C-state management
+4. **Task/Process**: No Task structure or process management beyond placeholders
+5. **Stress Tests**: Cannot run multi-CPU stress tests without scheduler infrastructure
 
 ### Next Steps for Enhancement
 
 1. **Immediate Priorities**:
-   - Increase trampoline CPU limit from 64 to match per-CPU limit of 256
    - Implement basic Task structure and scheduler framework
    - Add context switching support to utilize multiple CPUs
+   - Complete remote function call integration
 
 2. **Medium-term Goals**:
    - Create dedicated IPI types for scheduler operations (reschedule, migrate task)
-   - Implement advanced synchronization primitives (rwlocks, semaphores)
+   - Enable stress tests once scheduler is implemented
    - Add NUMA support via SRAT parsing
    - Create comprehensive SMP test suite
 

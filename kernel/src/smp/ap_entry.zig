@@ -17,6 +17,9 @@ const paging = @import("../x86_64/paging.zig");
 const smap = @import("../x86_64/smap.zig");
 const speculation = @import("../x86_64/speculation.zig");
 const cfi = @import("../x86_64/cfi.zig");
+const per_cpu_gdt = @import("../x86_64/per_cpu_gdt.zig");
+const ap_cpu_init = @import("ap_cpu_init.zig");
+const ipi = @import("ipi.zig");
 
 /// Application Processor main entry point
 pub fn apMain(cpu_id: u32, cpu_data: *per_cpu.CpuData) !void {
@@ -52,10 +55,16 @@ pub fn apMain(cpu_id: u32, cpu_data: *per_cpu.CpuData) !void {
     );
     ap_debug.setDebugValue(cpu_id, 1, @as(u64, eax) | (@as(u64, edx) << 32)); // Store CPUID info
 
-    // 1. Load GDT and IDT
-    // Note: GDT is already loaded by BSP, but we might want per-CPU GDT in future
-    // IDT is also already loaded, we just need to ensure it's available
-    // No action needed here as they're already set up by BSP
+    // 1. Load per-CPU GDT (Intel SDM Vol 3A Section 3.4.5)
+    // Each processor must have its own GDT to avoid race conditions when updating TSS
+    per_cpu_gdt.initializeForCpu(cpu_id) catch |err| {
+        ap_debug.recordApError(cpu_id, @intFromError(err), ap_debug.DebugFlags.MEMORY_ERROR);
+        return err;
+    };
+    per_cpu_gdt.loadForCpu(cpu_id);
+
+    // IDT is shared across all CPUs (Intel SDM Vol 3A Section 6.10)
+    // It's already loaded by BSP, no action needed
     ap_debug.updateApStage(cpu_id, .GdtIdtLoaded);
 
     // 2. Setup GSBASE for per-CPU access
@@ -85,7 +94,7 @@ pub fn apMain(cpu_id: u32, cpu_data: *per_cpu.CpuData) !void {
     ap_debug.updateApStage(cpu_id, .TssConfigured);
 
     // 5. Enable CPU security features
-    enableApSecurityFeatures();
+    enableApSecurityFeatures(cpu_data);
     ap_debug.updateApStage(cpu_id, .SecurityEnabled);
 
     // 6. Initialize CPU-specific subsystems
@@ -126,25 +135,24 @@ fn setupApTss(cpu_data: *per_cpu.CpuData) !void {
         cpu_data.ist_stacks[i] = stack;
     }
 
-    // Update TSS with this CPU's stacks
-    // Note: For now we use a single TSS. In the future, we may want per-CPU TSS
-    gdt.tss.rsp0 = @intFromPtr(cpu_data.kernel_stack);
+    // Update per-CPU TSS with this CPU's stacks (Intel SDM Vol 3A Section 7.2.1)
+    // Using per-CPU TSS eliminates race conditions
+    const kernel_stack_ptr = @intFromPtr(cpu_data.kernel_stack);
+    const ist_stack_ptrs = [7]u64{
+        @intFromPtr(cpu_data.ist_stacks[0]),
+        @intFromPtr(cpu_data.ist_stacks[1]),
+        @intFromPtr(cpu_data.ist_stacks[2]),
+        @intFromPtr(cpu_data.ist_stacks[3]),
+        @intFromPtr(cpu_data.ist_stacks[4]),
+        @intFromPtr(cpu_data.ist_stacks[5]),
+        @intFromPtr(cpu_data.ist_stacks[6]),
+    };
 
-    // Update IST entries
-    gdt.tss.ist1 = @intFromPtr(cpu_data.ist_stacks[0]);
-    gdt.tss.ist2 = @intFromPtr(cpu_data.ist_stacks[1]);
-    gdt.tss.ist3 = @intFromPtr(cpu_data.ist_stacks[2]);
-    gdt.tss.ist4 = @intFromPtr(cpu_data.ist_stacks[3]);
-    gdt.tss.ist5 = @intFromPtr(cpu_data.ist_stacks[4]);
-    gdt.tss.ist6 = @intFromPtr(cpu_data.ist_stacks[5]);
-    gdt.tss.ist7 = @intFromPtr(cpu_data.ist_stacks[6]);
-
-    // Update TSS descriptor
-    gdt.updateTSSDescriptor(@intFromPtr(&gdt.tss), @sizeOf(@TypeOf(gdt.tss)) - 1);
+    per_cpu_gdt.updateTssForCpu(@intCast(cpu_data.cpu_id), kernel_stack_ptr, &ist_stack_ptrs);
 }
 
 /// Enable security features on Application Processor
-fn enableApSecurityFeatures() void {
+fn enableApSecurityFeatures(cpu_data: *per_cpu.CpuData) void {
     // Enable SMAP (Supervisor Mode Access Prevention)
     // SMAP needs to be enabled per-CPU by setting CR4.SMAP
     if (smap.isEnabled()) {
@@ -158,13 +166,12 @@ fn enableApSecurityFeatures() void {
         );
     }
 
-    // Enable speculation mitigations per-CPU
-    // This enables CPU-specific mitigations like IBRS
-    speculation.onContextSwitch();
-
-    // Enable basic CPU features (NX bit, etc)
-    // This also sets up FPU via CR0.NE and CR4.OSFXSR
-    cpu_init.initializeCPU();
+    // Initialize AP CPU features to match BSP (Intel SDM Vol 3A Section 8.4.6)
+    // This ensures all CPUs have consistent security and feature configuration
+    ap_cpu_init.initializeAp(cpu_data.cpu_id) catch |err| {
+        ap_debug.recordApError(cpu_data.cpu_id, @intFromError(err), ap_debug.DebugFlags.CPU_FEATURE_MISSING);
+        // Continue anyway, some features might still work
+    };
 }
 
 /// Initialize AP-specific subsystems
@@ -184,19 +191,9 @@ fn idleLoop() noreturn {
     // Intel SDM 10.4.3 Step 9: APs remain in halted state
     // They respond only to INIT, NMI, SMI, and STPCLK#
     while (true) {
-        // Check for pending work
-        const cpu_data = per_cpu.getCurrentCpu();
-
-        // Handle pending IPIs
-        if (@atomicLoad(u32, &cpu_data.ipi_pending, .acquire) != 0) {
-            handlePendingIpis(cpu_data);
-        }
-
-        // Handle TLB flush if needed
-        if (@atomicLoad(bool, &cpu_data.tlb_flush_pending, .acquire)) {
-            paging.flushTLB();
-            @atomicStore(bool, &cpu_data.tlb_flush_pending, false, .release);
-        }
+        // IPIs are now handled via interrupt handlers, not polling
+        // The IPI infrastructure (ipi.zig) handles TLB shootdowns,
+        // reschedule requests, and function calls directly via interrupts
 
         // Enter low power state
         asm volatile (

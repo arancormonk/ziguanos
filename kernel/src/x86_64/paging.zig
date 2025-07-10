@@ -1051,6 +1051,28 @@ pub fn flushTLB() void {
     );
 }
 
+// Flush TLB on all CPUs for a specific address (Intel SDM Vol 3A Section 4.10.4.2)
+pub fn invalidatePageAllCpus(addr: u64) void {
+    // Use IPI for TLB shootdown if SMP is active
+    if (@import("../smp/per_cpu.zig").getCpuCount() > 1) {
+        @import("../smp/ipi.zig").tlbShootdown(addr);
+    } else {
+        // Single CPU, just invalidate locally
+        invalidatePage(addr);
+    }
+}
+
+// Flush entire TLB on all CPUs (Intel SDM Vol 3A Section 4.10.4.2)
+pub fn flushTLBAllCpus() void {
+    // Use IPI for TLB shootdown if SMP is active
+    if (@import("../smp/per_cpu.zig").getCpuCount() > 1) {
+        @import("../smp/ipi.zig").tlbShootdownAll();
+    } else {
+        // Single CPU, just flush locally
+        flushTLB();
+    }
+}
+
 // Delegate protection key functions to PKU module
 pub const setProtectionKey = pku.setProtectionKey;
 pub const getProtectionKey = pku.getProtectionKey;

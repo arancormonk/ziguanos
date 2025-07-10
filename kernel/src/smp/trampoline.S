@@ -297,10 +297,6 @@ ap_lm_entry:
     # If we got here, the address is readable
     movl $0x52454144, 0x588  # "READ"
 
-halt2:
-    hlt
-    jmp halt2
-
     # Jump to kernel entry point
     jmp *%rax
 
@@ -383,7 +379,7 @@ ap_cpu_id:
 
 .align 8
 ap_stack_array:
-    .fill 64, 8, 0            # Array of stack pointers (max 64 CPUs)
+    .fill 256, 8, 0           # Array of stack pointers (max 256 CPUs to match per_cpu.MAX_CPUS)
 
 ap_trampoline_end:
 

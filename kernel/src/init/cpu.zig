@@ -8,6 +8,9 @@ const cpu_init = @import("../x86_64/cpu_init.zig");
 const rng = @import("../x86_64/rng.zig");
 const cfi = @import("../x86_64/cfi.zig");
 const smap = @import("../x86_64/smap.zig");
+const ap_cpu_init = @import("../smp/ap_cpu_init.zig");
+const ipi = @import("../smp/ipi.zig");
+const call_function = @import("../smp/call_function.zig");
 
 /// Initialize CPU features and security mechanisms
 pub fn init() void {
@@ -31,6 +34,10 @@ pub fn init() void {
     // Initialize Control Flow Integrity (CFI)
     cfi.init();
     serial.println("[KERNEL] Control Flow Integrity (CFI) initialized", .{});
+
+    // Save BSP features for AP verification (Intel SDM Vol 3A Section 8.4.6)
+    ap_cpu_init.saveBspFeatures();
+    serial.println("[KERNEL] BSP CPU features saved for AP verification", .{});
 }
 
 /// Initialize complete CPU features after memory management is ready
@@ -44,6 +51,16 @@ pub fn initComplete() !void {
 
     // Test CET functionality
     cpu_init.testCET();
+    serial.flush();
+
+    // Initialize IPI infrastructure (Intel SDM Vol 3A Section 10.6)
+    ipi.init();
+    serial.println("[KERNEL] Inter-Processor Interrupt (IPI) infrastructure initialized", .{});
+    serial.flush();
+
+    // Initialize remote function call infrastructure
+    call_function.init();
+    serial.println("[KERNEL] Remote function call infrastructure initialized", .{});
     serial.flush();
 }
 

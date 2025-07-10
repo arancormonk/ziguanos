@@ -29,6 +29,9 @@ pub const CpuData = struct {
     // Synchronization
     tlb_flush_pending: bool,
     ipi_pending: u32,
+
+    // IPI function call support
+    call_function: ?*const fn () void,
 };
 
 /// Maximum number of CPUs supported
@@ -70,6 +73,7 @@ pub fn initBsp() !void {
         .interrupts_handled = 0,
         .tlb_flush_pending = false,
         .ipi_pending = 0,
+        .call_function = null,
     };
 
     // Set GSBASE to point to BSP's per-CPU data
@@ -111,6 +115,7 @@ pub fn allocateApData(apic_id: u8) !*CpuData {
         .interrupts_handled = 0,
         .tlb_flush_pending = false,
         .ipi_pending = 0,
+        .call_function = null,
     };
 
     return ap_data;
@@ -144,6 +149,22 @@ pub fn getCpuByApicId(apic_id: u8) ?*CpuData {
 /// Get total number of CPUs
 pub fn getCpuCount() u32 {
     return cpu_count;
+}
+
+// Get current CPU ID
+pub fn getCurrentCpuId() u32 {
+    return getCurrentCpu().cpu_id;
+}
+
+// Get current CPU data (safe version)
+pub fn getCurrentCpuData() ?*CpuData {
+    const gsbase = asm volatile ("rdgsbase %[ret]"
+        : [ret] "=r" (-> u64),
+    );
+    if (gsbase == 0) return null;
+    const cpu = @as(*CpuData, @ptrFromInt(gsbase));
+    if (cpu.magic != CPU_DATA_MAGIC) return null;
+    return cpu;
 }
 
 /// Update current task for this CPU

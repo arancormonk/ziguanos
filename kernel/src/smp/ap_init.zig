@@ -101,8 +101,8 @@ pub fn initAP(cpu_id: u32, apic_id: u8) !void {
     }
 
     // Also check against trampoline limit
-    if (cpu_id >= 64) {
-        serial.println("[SMP] ERROR: CPU ID {} exceeds trampoline limit of 64", .{cpu_id});
+    if (cpu_id >= 256) {
+        serial.println("[SMP] ERROR: CPU ID {} exceeds trampoline limit of 256", .{cpu_id});
         ap_debug.recordApError(cpu_id, @intFromEnum(ApError.InvalidCpuId), ap_debug.DebugFlags.INVALID_CPU_ID);
         return error.InvalidCpuId;
     }
@@ -133,6 +133,7 @@ pub fn initAP(cpu_id: u32, apic_id: u8) !void {
         .interrupts_handled = 0,
         .tlb_flush_pending = false,
         .ipi_pending = 0,
+        .call_function = null,
     };
 
     // Setup trampoline if not already done
@@ -844,7 +845,7 @@ fn updateTrampolineData(cpu_id: u32, stack_top: [*]u8, cpu_data: *per_cpu.CpuDat
     const pml4_addr_ptr = @as(*u64, @ptrFromInt(trampoline_base + ap_startup_data_offset + TrampolineOffsets.pml4_addr_offset));
     const entry_point_ptr = @as(*u64, @ptrFromInt(trampoline_base + ap_startup_data_offset + TrampolineOffsets.entry_point_offset));
     const cpu_id_ptr = @as(*u32, @ptrFromInt(trampoline_base + ap_startup_data_offset + TrampolineOffsets.cpu_id_offset));
-    const stack_array_ptr = @as(*[64]u64, @ptrFromInt(trampoline_base + ap_startup_data_offset + TrampolineOffsets.stack_array_offset));
+    const stack_array_ptr = @as(*[256]u64, @ptrFromInt(trampoline_base + ap_startup_data_offset + TrampolineOffsets.stack_array_offset));
 
     // Get current CR3 (physical address of PML4)
     const cr3 = asm volatile ("mov %%cr3, %[cr3]"
@@ -1559,4 +1560,14 @@ export fn apMainEntry(cpu_id: u32) callconv(.C) noreturn {
 /// Get AP startup state for debugging
 pub fn getStartupState() *const ApStartupState {
     return &startup_state;
+}
+
+/// Get detected CPU count from ACPI
+pub fn getDetectedCpuCount() u32 {
+    return per_cpu.getCpuCount();
+}
+
+/// Get online CPU count (BSP + ready APs)
+pub fn getOnlineCpuCount() u32 {
+    return 1 + @atomicLoad(u32, &startup_state.ap_ready_count, .acquire);
 }
