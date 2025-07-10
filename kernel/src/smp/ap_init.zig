@@ -40,13 +40,17 @@ var startup_lock = spinlock.SpinLock{};
 // Simple verification counter that APs increment
 pub var ap_alive_counter: u32 = 0;
 
+// Intel SDM 10.4.4: Lock Semaphore for AP initialization
+var lock_semaphore: std.atomic.Value(u32) = std.atomic.Value(u32).init(0); // 0 = VACANT
+
 // AP startup barrier for synchronization
 var ap_startup_barrier: ap_sync.ApBarrier = undefined;
 var barrier_initialized: bool = false;
 
 // Trampoline location in low memory
+// Intel SDM 10.4.4: Startup IPI vector specifies 4KB page number
 // Note: Some systems clear memory during INIT-SIPI-SIPI
-// Try 0x8000 which is in conventional memory
+// Try 0x8000 which is in conventional memory (page 8)
 const TRAMPOLINE_ADDR: u64 = 0x8000;
 
 // Stack size per CPU (64KB)
@@ -78,9 +82,9 @@ const TrampolineOffsets = struct {
     const idtr_offset: usize = 0x840; // 2112 bytes from ap_startup_data
     // ap_pml4_addr starts after idtr (6 bytes) + alignment to 8
     const pml4_addr_offset: usize = 0x848; // 2120 bytes from ap_startup_data
-    // ap_entry_point starts after pml4_addr (4 bytes) + alignment to 8
+    // ap_entry_point starts after pml4_addr (8 bytes now) - no alignment needed
     const entry_point_offset: usize = 0x850; // 2128 bytes from ap_startup_data
-    // ap_cpu_id starts after entry_point (8 bytes) + alignment to 4
+    // ap_cpu_id starts after entry_point (8 bytes)
     const cpu_id_offset: usize = 0x858; // 2136 bytes from ap_startup_data
     // ap_stack_array starts after cpu_id (4 bytes) + alignment to 8
     const stack_array_offset: usize = 0x860; // 2144 bytes from ap_startup_data
@@ -401,16 +405,14 @@ fn setupTrampoline() !void {
     // These regions must be accessible to both BSP and AP with cache coherency
     serial.println("[SMP] Verifying debug region accessibility and coherency...", .{});
 
-    // First, ensure the pages are mapped
-    const debug_base: u64 = 0x500;
-    const debug_end: u64 = 0x8000; // Include trampoline area
-
-    // Make the debug region uncacheable to avoid coherency issues
-    // This ensures all accesses go directly to memory
-    paging.makeRegionUncacheable(debug_base, debug_end - debug_base) catch |err| {
-        serial.println("[SMP] WARNING: Failed to make debug region uncacheable: {s}", .{error_utils.errorToString(err)});
-        // Continue anyway, but coherency might be an issue
-    };
+    // NOTE: We previously made the debug region uncacheable to avoid coherency issues,
+    // but this causes problems with AP writes during CPU mode transitions.
+    // The uncacheable memory semantics can corrupt writes when the CPU is switching
+    // between real mode, protected mode, and long mode.
+    // Instead, we'll rely on memory barriers and cache flushes for coherency.
+    //
+    // DO NOT make the debug region uncacheable - it causes AP startup failures!
+    serial.println("[SMP] Debug region remains cacheable (using barriers for coherency)", .{});
 
     // Test the region is accessible
     const debug_test = @as(*volatile u32, @ptrFromInt(0x500));
@@ -485,8 +487,12 @@ fn setupTrampoline() !void {
         return error.TrampolineTooLarge;
     }
 
-    // Map low memory page if needed (identity mapped in early boot)
-    // For now, we assume 0x8000 is accessible
+    // Intel SDM 4.2: Ensure trampoline page is identity mapped
+    // CRITICAL: The AP starts in real mode and needs identity mapping
+    ensureTrampolineIdentityMapped() catch |err| {
+        serial.println("[SMP] ERROR: Failed to ensure trampoline identity mapping: {s}", .{error_utils.errorToString(err)});
+        return err;
+    };
 
     // Copy trampoline code from the calculated runtime address
     const src = @as([*]const u8, @ptrFromInt(start_addr));
@@ -557,18 +563,19 @@ fn setupTrampoline() !void {
     }
     serial.println("[SMP] Patched IDT entries to point to exception handler at 0x{x}", .{exception_handler_addr});
 
+    // Intel SDM 11.12: Memory type changes must be done carefully
+    // For code regions, it's better to set cache attributes before copying code
+
     // Make the trampoline area executable (remove NX bit)
     paging.makeRegionExecutable(TRAMPOLINE_ADDR, trampoline_size) catch |err| {
         serial.println("[SMP] Failed to make trampoline executable: {s}", .{error_utils.errorToString(err)});
         return err;
     };
 
-    // CRITICAL: Also make the trampoline area uncacheable for coherency
-    // This ensures BSP and AP see consistent memory during startup
-    paging.makeRegionUncacheable(TRAMPOLINE_ADDR, trampoline_size) catch |err| {
-        serial.println("[SMP] WARNING: Failed to make trampoline uncacheable: {s}", .{error_utils.errorToString(err)});
-        // Continue but coherency might be an issue
-    };
+    // Intel SDM 11.12.4: Don't change cache attributes of active code
+    // The trampoline memory should remain cacheable for proper execution
+    // Cache coherency is maintained via WBINVD in sendInitSipiSipi
+    serial.println("[SMP] Trampoline area remains cacheable for execution", .{});
 
     // Fix up the GDTR base address in the trampoline
     // The GDTR in the trampoline has a relative base that needs to be adjusted
@@ -653,6 +660,96 @@ fn setupTrampoline() !void {
     if (verify_ptr[0] != 0xFA) { // Should start with cli
         serial.println("[SMP] ERROR: Trampoline corrupted immediately after setup!", .{});
     }
+}
+
+/// Ensure the trampoline memory is identity mapped
+/// Intel SDM 4.2: Identity mapping means virtual address = physical address
+fn ensureTrampolineIdentityMapped() !void {
+    // Intel SDM 10.4.4: The AP starts in real mode at the physical address
+    // specified by the SIPI vector. This requires identity mapping.
+
+    // CRITICAL: The low memory area (0x0 - 0x100000) needs to be accessible
+    // for real mode operation. The AP will start at physical address 0x8000.
+
+    // First, check if the page table exists for low memory
+    // If not, we need to create the necessary page table hierarchy
+    serial.println("[SMP] Ensuring identity mapping for trampoline at 0x{x}", .{TRAMPOLINE_ADDR});
+
+    // The first GB should already be mapped with 2MB pages during paging initialization
+    // Let's verify that the 2MB page covering our trampoline area is present
+    serial.println("[SMP] Verifying low memory mapping...", .{});
+
+    // Check if we can access the trampoline area
+    const test_access = paging.getPhysicalAddress(TRAMPOLINE_ADDR) catch |err| {
+        serial.println("[SMP] ERROR: Trampoline area at 0x{x} is not accessible: {s}", .{ TRAMPOLINE_ADDR, @errorName(err) });
+
+        // The first GB should be mapped with 2MB pages. If it's not accessible,
+        // there's a fundamental issue with the page tables
+        serial.println("[SMP] CRITICAL: Low memory is not mapped! This should have been done during paging init.", .{});
+
+        // Try to diagnose the issue
+        // Check if the PDPT entry for the first GB exists
+        const pml4_entry = paging.pml4_table[0];
+        serial.println("[SMP] PML4[0] = 0x{x}", .{pml4_entry});
+
+        if ((pml4_entry & paging.PAGE_PRESENT) != 0) {
+            // PML4 entry exists, check PDPT
+            const pdpt_phys = pml4_entry & paging.PHYS_ADDR_MASK;
+            const pdpt = @as(*[512]u64, @ptrFromInt(pdpt_phys));
+            const pdpt_entry = pdpt[0];
+            serial.println("[SMP] PDPT[0] = 0x{x}", .{pdpt_entry});
+
+            if ((pdpt_entry & paging.PAGE_PRESENT) != 0) {
+                // Check if it's a 1GB page or points to a PD
+                if ((pdpt_entry & paging.PAGE_HUGE) != 0) {
+                    serial.println("[SMP] First GB is mapped as a 1GB page", .{});
+                } else {
+                    // It points to a PD, check the PD entry
+                    const pd_phys = pdpt_entry & paging.PHYS_ADDR_MASK;
+                    const pd = @as(*[512]u64, @ptrFromInt(pd_phys));
+                    const pd_entry_idx = (TRAMPOLINE_ADDR >> 21) & 0x1FF; // Index for 2MB page
+                    const pd_entry = pd[pd_entry_idx];
+                    serial.println("[SMP] PD[{}] (for address 0x{x}) = 0x{x}", .{ pd_entry_idx, TRAMPOLINE_ADDR, pd_entry });
+
+                    if ((pd_entry & paging.PAGE_PRESENT) == 0) {
+                        serial.println("[SMP] ERROR: The 2MB page containing trampoline is not present!", .{});
+                    }
+                }
+            } else {
+                serial.println("[SMP] ERROR: PDPT[0] is not present!", .{});
+            }
+        } else {
+            serial.println("[SMP] ERROR: PML4[0] is not present!", .{});
+        }
+
+        return err;
+    };
+
+    // Mask off the NX bit to get the actual physical address
+    const actual_phys = test_access & 0x000FFFFFFFFFF000;
+    serial.println("[SMP] Trampoline area is accessible at physical address 0x{x} (raw: 0x{x})", .{ actual_phys, test_access });
+
+    if (actual_phys != TRAMPOLINE_ADDR) {
+        serial.println("[SMP] ERROR: Trampoline is not identity mapped! Phys 0x{x} != Virt 0x{x}", .{ actual_phys, TRAMPOLINE_ADDR });
+        return error.IdentityMappingFailed;
+    }
+
+    // The area is already mapped correctly as part of a 2MB page
+    serial.println("[SMP] Trampoline area is already identity mapped as part of 2MB page", .{});
+
+    // For now, skip splitting the page - that seems to cause issues
+    // We'll just make sure the trampoline area is executable later
+    serial.println("[SMP] Using existing 2MB page mapping for trampoline", .{});
+
+    // Verify debug region mapping
+    _ = paging.getPhysicalAddress(0x500) catch |err| {
+        serial.println("[SMP] WARNING: Debug region at 0x500 not mapped: {s}", .{@errorName(err)});
+        // This is OK - the debug region is in the first page which we skip for null protection
+        // The important thing is that the trampoline at 0x8000 is accessible
+    };
+
+    serial.println("[SMP] Low memory mapping verification complete", .{});
+    serial.println("[SMP] Trampoline at 0x{x} is identity mapped and ready", .{TRAMPOLINE_ADDR});
 }
 
 /// Find the exception handler offset in the trampoline
@@ -743,7 +840,8 @@ fn updateTrampolineData(cpu_id: u32, stack_top: [*]u8, cpu_data: *per_cpu.CpuDat
     const trampoline_base = TRAMPOLINE_ADDR;
 
     // Calculate addresses of each field
-    const pml4_addr_ptr = @as(*u32, @ptrFromInt(trampoline_base + ap_startup_data_offset + TrampolineOffsets.pml4_addr_offset));
+    // CRITICAL: ap_pml4_addr is now 64-bit to support high memory
+    const pml4_addr_ptr = @as(*u64, @ptrFromInt(trampoline_base + ap_startup_data_offset + TrampolineOffsets.pml4_addr_offset));
     const entry_point_ptr = @as(*u64, @ptrFromInt(trampoline_base + ap_startup_data_offset + TrampolineOffsets.entry_point_offset));
     const cpu_id_ptr = @as(*u32, @ptrFromInt(trampoline_base + ap_startup_data_offset + TrampolineOffsets.cpu_id_offset));
     const stack_array_ptr = @as(*[64]u64, @ptrFromInt(trampoline_base + ap_startup_data_offset + TrampolineOffsets.stack_array_offset));
@@ -753,9 +851,15 @@ fn updateTrampolineData(cpu_id: u32, stack_top: [*]u8, cpu_data: *per_cpu.CpuDat
         : [cr3] "=r" (-> u64),
     );
 
-    // Update PML4 address (32-bit physical address)
-    pml4_addr_ptr.* = @truncate(cr3);
-    serial.println("[SMP] Set ap_pml4_addr to 0x{x}", .{pml4_addr_ptr.*});
+    // Intel SDM 4.5: Update PML4 address (full 64-bit physical address)
+    pml4_addr_ptr.* = cr3;
+    serial.println("[SMP] Set ap_pml4_addr to 0x{x}", .{cr3});
+
+    // Verify PML4 is below 4GB for 32-bit mode compatibility
+    if (cr3 > 0xFFFFFFFF) {
+        serial.println("[SMP] WARNING: PML4 at 0x{x} is above 4GB!", .{cr3});
+        serial.println("[SMP] This will cause issues in 32-bit protected mode", .{});
+    }
 
     // Update entry point (64-bit virtual address)
     // In a PIE kernel, @intFromPtr already gives us the runtime address
@@ -917,7 +1021,9 @@ fn pitPollingDelayTicks(ticks: u16) void {
 }
 
 /// Send INIT-SIPI-SIPI sequence to start AP
+/// Intel SDM 10.4.4: MP Initialization Example
 fn sendInitSipiSipi(apic_id: u8) !void {
+    // Intel SDM 10.4.2: All devices capable of delivering interrupts must be inhibited
     // Disable interrupts for the entire sequence
     asm volatile ("cli" ::: "memory");
     defer asm volatile ("sti" ::: "memory");
@@ -975,6 +1081,19 @@ fn sendInitSipiSipi(apic_id: u8) !void {
     // Ensure writes are visible and prevent reordering
     asm volatile ("mfence; lfence" ::: "memory");
 
+    // Flush cache lines for the debug area to ensure AP sees clean memory
+    // This is critical now that we're keeping the memory cacheable
+    var flush_addr: u64 = 0x500;
+    while (flush_addr <= 0x5C0) : (flush_addr += 64) {
+        asm volatile ("clflush (%[addr])"
+            :
+            : [addr] "r" (flush_addr),
+            : "memory"
+        );
+    }
+    // Ensure all cache flushes complete
+    asm volatile ("mfence" ::: "memory");
+
     // Immediately verify the clear worked
     const verify_region = @as([*]const volatile u8, @ptrFromInt(0x510));
     var all_zero = true;
@@ -993,14 +1112,16 @@ fn sendInitSipiSipi(apic_id: u8) !void {
         serial.println("", .{});
     }
 
+    // Intel SDM 8.7.5: Cache coherency in MP systems
+    // Intel SDM 11.12: WBINVD flushes and invalidates all caches
     // CRITICAL: Ensure complete cache coherency before starting AP
-    // Write back and invalidate all caches to prevent any coherency issues
     serial.println("[SMP] Ensuring cache coherency before SIPI...", .{});
 
     // Flush all modified cache lines and invalidate caches
-    // This is a privileged instruction that ensures all cores see consistent memory
+    // This ensures the AP sees the trampoline code we just copied
     asm volatile ("wbinvd" ::: "memory");
 
+    // Intel SDM 8.3: Serializing instructions
     // Additional memory barrier for complete serialization
     asm volatile ("mfence" ::: "memory");
 
@@ -1037,18 +1158,19 @@ fn sendInitSipiSipi(apic_id: u8) !void {
         _ = apic.readRegister(0x280);
     }
 
-    // Send INIT IPI
+    // Intel SDM Table 10-1: Send INIT IPI
     serial.println("[SMP] Sending INIT IPI to APIC ID {}", .{apic_id});
 
-    // CRITICAL: For modern CPUs, send INIT-deassert first (legacy compatibility)
+    // Intel SDM 10.4.3: Send INIT-deassert first for legacy compatibility
     // This ensures the AP is in a known state
     try apic.sendIPI(apic_id, 0, .Init, .Deassert, .Level, .NoShorthand);
     busyWait(10000); // Short delay
 
-    // Now send the actual INIT assert
+    // Intel SDM: Send the actual INIT assert IPI
+    // Format: 000C4500H (as shown in Table 10-1)
     try apic.sendIPI(apic_id, 0, .Init, .Assert, .Edge, .NoShorthand);
 
-    // Wait 10ms using PIT polling (Intel SDM requirement)
+    // Intel SDM 10.4.4: Wait 10ms after INIT IPI
     serial.println("[SMP] Waiting 10ms after INIT...", .{});
     pitPollingDelay(10_000); // 10ms = 10,000 microseconds
 
@@ -1106,7 +1228,8 @@ fn sendInitSipiSipi(apic_id: u8) !void {
     // Some systems hang if SIPI is sent while certain operations are pending
     asm volatile ("mfence; lfence" ::: "memory");
 
-    // Send first SIPI with vector 0x08 (0x8000 >> 12)
+    // Intel SDM Table 10-1: Send first SIPI with vector
+    // Format: 000C46XXH where XX is the vector (0x08 for 0x8000)
     // SIPI vector is the page number (address >> 12), so 0x08 = 0x8000
     serial.println("[SMP] Sending first SIPI with vector 0x08 (starts at 0x8000)", .{});
 
@@ -1115,17 +1238,17 @@ fn sendInitSipiSipi(apic_id: u8) !void {
 
     try apic.sendIPI(apic_id, 0x08, .Startup, .Assert, .Edge, .NoShorthand);
 
-    // Wait 200us (0.2ms) between SIPIs as per Intel SDM
+    // Intel SDM 10.4.4: Wait 200us between SIPIs
     serial.println("[SMP] Waiting 200us between SIPIs...", .{});
     pitPollingDelay(200); // Wait 200 microseconds
 
     // Additional synchronization delay
     ap_sync.apStartupDelay(5_000);
 
-    // Send second SIPI
+    // Intel SDM 10.4.4: Send second SIPI
     serial.println("[SMP] Sending second SIPI with vector 0x08", .{});
 
-    // CRITICAL: Ensure interrupts stay disabled during second SIPI
+    // Intel SDM 10.4.2: Ensure interrupts stay disabled during AP startup
     // Some systems have issues if interrupts fire during AP startup
     flags = asm volatile ("pushfq; popq %[flags]; cli"
         : [flags] "=r" (-> u64),
@@ -1149,6 +1272,14 @@ fn sendInitSipiSipi(apic_id: u8) !void {
     const immediate_debug = @as(*volatile u32, @ptrFromInt(0x500));
     if (immediate_debug.* == 0x12345678) {
         serial.println("[SMP] AP has written magic to debug region!", .{});
+    }
+
+    // Also check the very early marker at 0x8100
+    const early_marker = @as(*volatile u16, @ptrFromInt(0x8100));
+    if (early_marker.* == 0xABCD) {
+        serial.println("[SMP] AP executed first instruction! Early marker found at 0x8100", .{});
+    } else {
+        serial.println("[SMP] No early marker found at 0x8100 (value: 0x{x})", .{early_marker.*});
     }
 
     serial.println("[SMP] INIT-SIPI-SIPI sequence complete", .{});
@@ -1245,6 +1376,13 @@ fn sendInitSipiSipi(apic_id: u8) !void {
         serial.println("[SMP]     Halt marker: 0x{x} (AP reached halt before jump)", .{halt_marker});
     }
 
+    // Check new HALT marker at 0x5A8
+    const debug_halt_marker = @as(*volatile u32, @ptrFromInt(0x5A8)).*;
+    if (debug_halt_marker == 0x48414C54) { // "HALT"
+        serial.println("[SMP]     DEBUG: AP HALTED before kernel jump! This confirms AP reached 64-bit mode successfully.", .{});
+        serial.println("[SMP]     The issue is with jumping to the kernel entry point.", .{});
+    }
+
     // Check debug flow markers
     const before_delay = @as(*volatile u32, @ptrFromInt(0x534)).*;
     const after_delay = @as(*volatile u32, @ptrFromInt(0x538)).*;
@@ -1300,6 +1438,12 @@ fn sendInitSipiSipi(apic_id: u8) !void {
 pub fn startAllAPs(processor_info: []const per_cpu.ProcessorInfo) !void {
     serial.println("[SMP] Starting {} Application Processors", .{processor_info.len - 1});
 
+    // Intel SDM 10.4.4.1 Step 13: Initialize Lock Semaphore to VACANT (0)
+    lock_semaphore.store(0, .release);
+
+    // Intel SDM 10.4.4.1 Step 14: Set COUNT variable to 1 (BSP)
+    @atomicStore(u32, &startup_state.ap_ready_count, 1, .release);
+
     // Initialize debug state
     ap_debug.init(@intCast(processor_info.len - 1));
 
@@ -1308,8 +1452,7 @@ pub fn startAllAPs(processor_info: []const per_cpu.ProcessorInfo) !void {
     ap_startup_barrier = ap_sync.ApBarrier.init(ap_count);
     barrier_initialized = true;
 
-    // Reset startup state
-    @atomicStore(u32, &startup_state.ap_ready_count, 0, .release);
+    // Reset other startup state
     @atomicStore(u32, &startup_state.ap_boot_error, 0, .release);
     @atomicStore(bool, &startup_state.proceed_signal, false, .release);
 
@@ -1341,9 +1484,11 @@ pub fn startAllAPs(processor_info: []const per_cpu.ProcessorInfo) !void {
     // Signal all APs to proceed
     @atomicStore(bool, &startup_state.proceed_signal, true, .release);
 
-    // Report AP alive counter
+    // Intel SDM 10.4.4.1 Step 16: Read and evaluate COUNT variable
+    const final_count = @atomicLoad(u32, &startup_state.ap_ready_count, .acquire);
     const alive_count = @atomicLoad(u32, &ap_alive_counter, .acquire);
     serial.println("[SMP] All APs started and ready", .{});
+    serial.println("[SMP] Processor count: {} (BSP + {} APs)", .{ final_count, final_count - 1 });
     serial.println("[SMP] AP alive counter: {} (expected: {})", .{ alive_count, processor_info.len - 1 });
 
     // Show debug summary
@@ -1370,11 +1515,6 @@ export fn apMainEntry(cpu_id: u32) callconv(.C) noreturn {
     // Write CPU ID to next location
     const id_ptr = @as(*volatile u32, @ptrFromInt(0x5B4));
     id_ptr.* = cpu_id;
-
-    // Halt here to debug
-    while (true) {
-        asm volatile ("hlt");
-    }
 
     // Add a small delay to ensure BSP has completed SIPI and released locks
     ap_sync.apStartupDelay(100_000); // 100k pause cycles

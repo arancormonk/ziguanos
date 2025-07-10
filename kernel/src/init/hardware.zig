@@ -48,6 +48,7 @@ pub fn init() void {
     serial.println("[KERNEL] Enhanced interrupt handling initialized", .{});
     serial.flush();
 
+    // Intel SDM 10.4.4.1 Step 5: BSP creates ACPI table and/or MP table
     // Initialize ACPI subsystem if we have boot info
     if (saved_boot_info) |boot_info| {
         if (boot_info.rsdp_addr != 0) {
@@ -82,6 +83,7 @@ pub fn init() void {
         apic.printInfo();
         serial.println("[KERNEL] APIC initialized successfully", .{});
 
+        // Intel SDM 10.4.1: BSP flag is set in IA32_APIC_BASE MSR
         // Update BSP's APIC ID now that APIC is initialized
         const APIC_ID_REG = 0x20; // APIC ID register offset
         const apic_id = @as(u8, @truncate(apic.readRegister(APIC_ID_REG) >> 24));

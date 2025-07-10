@@ -425,9 +425,16 @@ fn setupIdentityMapping(boot_info: *const uefi_boot.UEFIBootInfo) usize {
             const gb_contains_kernel = (kernel_start >= virt_addr and kernel_start < virt_addr + PAGE_SIZE_1G) or
                 (kernel_end > virt_addr and kernel_end <= virt_addr + PAGE_SIZE_1G);
 
+            // Intel SDM 4.2: Also check if this GB contains critical low memory
+            // The first GB (0-1GB) must always use smaller pages for:
+            // - AP trampoline at 0x8000
+            // - Legacy memory regions
+            // - BIOS/UEFI structures
+            const is_first_gb = (i == 0);
+
             // For GBs that don't contain the kernel, use 1GB pages with NX
             // For the GB containing the kernel, we need to use 2MB pages for finer W^X control
-            if (gb_contains_kernel) {
+            if (gb_contains_kernel or is_first_gb) {
                 // Don't use a 1GB page for the kernel GB - we need finer control
                 // Allocate a PD table for this GB if available
                 if (i < pd_tables.len) {
@@ -442,7 +449,11 @@ fn setupIdentityMapping(boot_info: *const uefi_boot.UEFIBootInfo) usize {
                         pd_tables[i][j] = addr | PAGE_PRESENT | PAGE_WRITABLE | PAGE_HUGE | PAGE_NO_EXECUTE;
                     }
 
-                    serial.println("[PAGING] GB 0x{x} contains kernel - using 2MB pages for W^X enforcement", .{i});
+                    if (gb_contains_kernel) {
+                        serial.println("[PAGING] GB 0x{x} contains kernel - using 2MB pages for W^X enforcement", .{i});
+                    } else {
+                        serial.println("[PAGING] GB 0 (low memory) - using 2MB pages for AP trampoline access", .{});
+                    }
                 } else {
                     serial.println("[PAGING] CRITICAL: No PD table available for kernel GB!", .{});
                     serial.println("[PAGING] CRITICAL: Cannot enforce W^X protection - system halted for security", .{});
@@ -1119,6 +1130,8 @@ pub fn unmapPage(virt_addr: u64) !void {
 
     // Navigate to the page table
     const pdpt_phys = pml4_table[pml4_idx] & PHYS_ADDR_MASK;
+    // Intel SDM 4.2: Physical addresses must be accessible
+    // CRITICAL: This assumes pdpt_phys is identity mapped!
     const pdpt = @as(*[512]u64, @ptrFromInt(pdpt_phys));
 
     if ((pdpt[pdpt_idx] & PAGE_PRESENT) == 0) {
@@ -1304,6 +1317,40 @@ pub fn mapPageWithKey(virt_addr: u64, phys_addr: u64, flags: u64, key: pku.Prote
     try mapPageRaw(virt_addr, entry);
 }
 
+/// Get the physical address that a virtual address maps to
+/// Handles 4KB, 2MB, and 1GB pages correctly
+pub fn getPhysicalAddress(virt_addr: u64) !u64 {
+    const pte = try getPageTableEntry(virt_addr);
+
+    // Check page size to determine how to extract physical address
+    if ((pte & PAGE_HUGE) != 0) {
+        // Large page - need to determine if it's 2MB or 1GB
+        const pml4_idx = getTableIndex(virt_addr, 4);
+        const pdpt_idx = getTableIndex(virt_addr, 3);
+
+        // Check if this is a 1GB page (in PDPT) or 2MB page (in PD)
+        const pdpt_phys = pml4_table[pml4_idx] & PHYS_ADDR_MASK;
+        const pdpt = @as(*[512]u64, @ptrFromInt(pdpt_phys));
+
+        if ((pdpt[pdpt_idx] & PAGE_HUGE) != 0) {
+            // 1GB page
+            const base = pte & ~@as(u64, PAGE_SIZE_1G - 1);
+            const offset = virt_addr & (PAGE_SIZE_1G - 1);
+            return base + offset;
+        } else {
+            // 2MB page
+            const base = pte & ~@as(u64, PAGE_SIZE_2M - 1);
+            const offset = virt_addr & (PAGE_SIZE_2M - 1);
+            return base + offset;
+        }
+    } else {
+        // 4KB page
+        const base = pte & PHYS_ADDR_MASK;
+        const offset = virt_addr & (PAGE_SIZE_4K - 1);
+        return base + offset;
+    }
+}
+
 // Get page table entry for a virtual address
 pub fn getPageTableEntry(virt_addr: u64) !u64 {
     const pml4_idx = getTableIndex(virt_addr, 4);
@@ -1361,29 +1408,130 @@ pub fn makeRegionExecutable(start_addr: u64, size: u64) !void {
 
     serial.println("[PAGING] Making region 0x{x}-0x{x} executable", .{ aligned_start, aligned_end });
 
-    // For the trampoline at 0x8000, we need to handle the first 2MB page specially
+    // For the trampoline at 0x8000, just handle the 2MB page directly
     if (aligned_start < PAGE_SIZE_2M) {
-        // The first 2MB is mapped directly in kernel_pd[0]
-        const old_entry = kernel_pd[0];
-        serial.println("[PAGING] First 2MB page entry: 0x{x}", .{old_entry});
+        // Get the PD entry for the first 2MB
+        const pml4_idx = 0;
+        const pdpt_idx = 0;
+        const pd_idx = 0;
 
-        if ((old_entry & PAGE_NO_EXECUTE) != 0) {
-            // Remove NX bit
-            const new_entry = old_entry & ~PAGE_NO_EXECUTE;
-            kernel_pd[0] = new_entry;
-            serial.println("[PAGING] Updated first 2MB page entry to: 0x{x} (removed NX bit)", .{new_entry});
+        if ((pml4_table[pml4_idx] & PAGE_PRESENT) != 0) {
+            const pdpt_phys = pml4_table[pml4_idx] & PHYS_ADDR_MASK;
+            const pdpt = @as(*[512]u64, @ptrFromInt(pdpt_phys));
 
-            // Flush TLB for the entire 2MB page
-            var flush_addr: u64 = 0;
-            while (flush_addr < PAGE_SIZE_2M) : (flush_addr += PAGE_SIZE_4K) {
-                invalidatePage(flush_addr);
+            if ((pdpt[pdpt_idx] & PAGE_PRESENT) != 0 and (pdpt[pdpt_idx] & PAGE_HUGE) == 0) {
+                const pd_phys = pdpt[pdpt_idx] & PHYS_ADDR_MASK;
+                const pd = @as(*[512]u64, @ptrFromInt(pd_phys));
+
+                if ((pd[pd_idx] & PAGE_PRESENT) != 0 and (pd[pd_idx] & PAGE_HUGE) != 0) {
+                    // This is a 2MB page - clear the NX bit
+                    const old_entry = pd[pd_idx];
+                    if ((old_entry & PAGE_NO_EXECUTE) != 0) {
+                        pd[pd_idx] = old_entry & ~PAGE_NO_EXECUTE;
+                        serial.println("[PAGING] Cleared NX bit on first 2MB page (was 0x{x}, now 0x{x})", .{ old_entry, pd[pd_idx] });
+
+                        // Flush TLB for the entire 2MB page
+                        var flush_addr: u64 = 0;
+                        while (flush_addr < PAGE_SIZE_2M) : (flush_addr += PAGE_SIZE_4K) {
+                            invalidatePage(flush_addr);
+                        }
+                    } else {
+                        serial.println("[PAGING] First 2MB page already executable", .{});
+                    }
+                } else {
+                    serial.println("[PAGING] First 2MB not using huge page, might be using 4KB pages", .{});
+                }
             }
-        } else {
-            serial.println("[PAGING] First 2MB page already executable", .{});
         }
     }
 
     serial.println("[PAGING] Region made executable", .{});
+}
+
+// Split a 2MB page into 4KB pages for fine-grained control
+// This is necessary for low memory where we need different permissions for different areas
+pub fn split2MBPage(mb_addr: u64) !void {
+    var guard = stack_security.protect();
+    defer guard.deinit();
+
+    const aligned_addr = mb_addr & ~@as(u64, PAGE_SIZE_2M - 1);
+    serial.println("[PAGING] Splitting 2MB page at 0x{x} into 4KB pages", .{aligned_addr});
+
+    // Debug: show current page table state
+    serial.println("[PAGING] PML4[0] = 0x{x}", .{pml4_table[0]});
+
+    // Safety check - don't try to split if paging isn't fully initialized
+    const cr3 = getCurrentPageTable();
+    if (cr3 == 0) {
+        serial.println("[PAGING] ERROR: CR3 is 0, paging not initialized", .{});
+        return error.PagingNotInitialized;
+    }
+
+    // Find the PD entry for this 2MB page
+    const pml4_idx = getTableIndex(aligned_addr, 4);
+    const pdpt_idx = getTableIndex(aligned_addr, 3);
+    const pd_idx = getTableIndex(aligned_addr, 2);
+
+    // Navigate to the PD
+    if ((pml4_table[pml4_idx] & PAGE_PRESENT) == 0) {
+        return error.PageNotMapped;
+    }
+
+    const pdpt_phys = pml4_table[pml4_idx] & PHYS_ADDR_MASK;
+    const pdpt = @as(*[512]u64, @ptrFromInt(pdpt_phys));
+
+    if ((pdpt[pdpt_idx] & PAGE_PRESENT) == 0) {
+        return error.PageNotMapped;
+    }
+
+    if ((pdpt[pdpt_idx] & PAGE_HUGE) != 0) {
+        return error.CannotSplit1GBPage; // Would need to split 1GB->2MB first
+    }
+
+    const pd_phys = pdpt[pdpt_idx] & PHYS_ADDR_MASK;
+    const pd = @as(*[512]u64, @ptrFromInt(pd_phys));
+
+    const pd_entry = pd[pd_idx];
+    if ((pd_entry & PAGE_PRESENT) == 0) {
+        return error.PageNotMapped;
+    }
+
+    if ((pd_entry & PAGE_HUGE) == 0) {
+        // Already using 4KB pages
+        serial.println("[PAGING] Page at 0x{x} already uses 4KB pages", .{aligned_addr});
+        return;
+    }
+
+    // Allocate a new page table for the 4KB pages
+    const pt_page = pmm.allocPage() orelse {
+        return error.OutOfMemory;
+    };
+    const pt = @as(*[512]u64, @ptrFromInt(pt_page));
+
+    // Zero the page table
+    @memset(@as([*]u8, @ptrCast(pt))[0..PAGE_SIZE_4K], 0);
+
+    // Get the flags from the 2MB page (excluding PAGE_HUGE)
+    const flags = pd_entry & ~(PAGE_HUGE | PHYS_ADDR_MASK);
+
+    // Fill the PT with 512 4KB pages that map the same physical memory
+    const base_phys = pd_entry & PHYS_ADDR_MASK;
+    for (0..512) |i| {
+        const page_phys = base_phys + (i * PAGE_SIZE_4K);
+        pt[i] = page_phys | flags | PAGE_PRESENT;
+    }
+
+    // Replace the PD entry to point to the new PT
+    pd[pd_idx] = pt_page | PAGE_PRESENT | PAGE_WRITABLE;
+
+    // Flush TLB for the entire 2MB region
+    var flush_addr = aligned_addr;
+    const end_addr = aligned_addr + PAGE_SIZE_2M;
+    while (flush_addr < end_addr) : (flush_addr += PAGE_SIZE_4K) {
+        invalidatePage(flush_addr);
+    }
+
+    serial.println("[PAGING] Successfully split 2MB page into 4KB pages", .{});
 }
 
 // Make a memory region uncacheable - critical for SMP coherency
@@ -1553,4 +1701,58 @@ pub fn mapMMIORegion(virt_addr: u64, phys_addr: u64, size: usize) !void {
     asm volatile ("mfence" ::: "memory");
 
     serial.println("[PAGING] MMIO region mapped successfully", .{});
+}
+
+/// Ensure a region is identity mapped (virtual address = physical address)
+/// This is critical for AP trampoline code
+pub fn ensureIdentityMapping(virt_addr: u64, size: u64) !void {
+    var guard = stack_security.protect();
+    defer guard.deinit();
+
+    const aligned_start = virt_addr & ~@as(u64, PAGE_SIZE_4K - 1);
+    const aligned_end = (virt_addr + size + PAGE_SIZE_4K - 1) & ~@as(u64, PAGE_SIZE_4K - 1);
+
+    serial.println("[PAGING] Ensuring identity mapping for 0x{x}-0x{x}", .{ aligned_start, aligned_end });
+
+    // For each page in the range, ensure it's identity mapped
+    var current_addr = aligned_start;
+    while (current_addr < aligned_end) : (current_addr += PAGE_SIZE_4K) {
+        // Check if page is already mapped correctly
+        const pte = getPageTableEntry(current_addr) catch |err| {
+            if (err == error.PageNotMapped) {
+                // Page not mapped - need to map it
+                serial.println("[PAGING] Page at 0x{x} not mapped, creating identity mapping", .{current_addr});
+
+                // Map with standard flags for executable code
+                const flags = PAGE_PRESENT | PAGE_WRITABLE;
+                try mapPage(current_addr, current_addr, flags);
+            } else {
+                return err;
+            }
+            continue;
+        };
+
+        const phys_addr = pte & PHYS_ADDR_MASK;
+        if (phys_addr != current_addr) {
+            serial.println("[PAGING] Page at 0x{x} not identity mapped (phys=0x{x})", .{ current_addr, phys_addr });
+
+            // Need to remap as identity mapping
+            // First unmap the old mapping
+            unmapPage(current_addr) catch |err| {
+                serial.println("[PAGING] WARNING: Failed to unmap page: {}", .{err});
+            };
+
+            // Then create identity mapping
+            const flags = PAGE_PRESENT | PAGE_WRITABLE;
+            try mapPage(current_addr, current_addr, flags);
+        }
+    }
+
+    // Flush TLB for the entire range
+    current_addr = aligned_start;
+    while (current_addr < aligned_end) : (current_addr += PAGE_SIZE_4K) {
+        invalidatePage(current_addr);
+    }
+
+    serial.println("[PAGING] Identity mapping ensured", .{});
 }

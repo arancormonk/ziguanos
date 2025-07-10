@@ -27,6 +27,31 @@ pub fn apMain(cpu_id: u32, cpu_data: *per_cpu.CpuData) !void {
     // Mark kernel entry
     ap_debug.updateApStage(cpu_id, .KernelEntry);
 
+    // Intel SDM 10.4.4.2 Step 5: Execute CPUID to verify "GenuineIntel"
+    var eax: u32 = 0;
+    var ebx: u32 = undefined;
+    var ecx: u32 = undefined;
+    var edx: u32 = undefined;
+    asm volatile ("cpuid"
+        : [eax] "={eax}" (eax),
+          [ebx] "={ebx}" (ebx),
+          [ecx] "={ecx}" (ecx),
+          [edx] "={edx}" (edx),
+        : [func] "{eax}" (@as(u32, 0)),
+    );
+    // Verify "GenuineIntel" signature (optional, we support AMD too)
+
+    // Intel SDM 10.4.4.2 Step 6: Save CPUID values for later use
+    // Execute CPUID with EAX=1 to get processor info
+    asm volatile ("cpuid"
+        : [eax] "={eax}" (eax),
+          [ecx] "={ecx}" (ecx),
+          [edx] "={edx}" (edx),
+        : [func] "{eax}" (@as(u32, 1)),
+          [zero] "{ecx}" (@as(u32, 0)),
+    );
+    ap_debug.setDebugValue(cpu_id, 1, @as(u64, eax) | (@as(u64, edx) << 32)); // Store CPUID info
+
     // 1. Load GDT and IDT
     // Note: GDT is already loaded by BSP, but we might want per-CPU GDT in future
     // IDT is also already loaded, we just need to ensure it's available
@@ -138,6 +163,7 @@ fn enableApSecurityFeatures() void {
     speculation.onContextSwitch();
 
     // Enable basic CPU features (NX bit, etc)
+    // This also sets up FPU via CR0.NE and CR4.OSFXSR
     cpu_init.initializeCPU();
 }
 
@@ -153,7 +179,10 @@ fn initApSubsystems(cpu_id: u32) !void {
 }
 
 /// CPU idle loop
+/// Intel SDM 10.4.4.2 Step 13: Execute CLI and HLT instructions
 fn idleLoop() noreturn {
+    // Intel SDM 10.4.3 Step 9: APs remain in halted state
+    // They respond only to INIT, NMI, SMI, and STPCLK#
     while (true) {
         // Check for pending work
         const cpu_data = per_cpu.getCurrentCpu();

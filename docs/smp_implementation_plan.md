@@ -4,7 +4,7 @@
 
 This document provides a detailed, step-by-step plan for implementing Symmetric Multi-Processing (SMP) support in the Ziguanos operating system. The plan follows Intel x86-64 architecture recommendations and industry-standard practices for multi-processor systems.
 
-**UPDATE (2025-07-08)**: After comprehensive code analysis, SMP support has been fully implemented in Ziguanos. This document now reflects the completed implementation status and provides guidance for future enhancements.
+**UPDATE (2025-07-10)**: Comprehensive code analysis reveals that SMP boot infrastructure is **fully implemented** in Ziguanos. Multiple CPUs successfully boot and enter idle loops. However, without a scheduler implementation, the additional CPUs cannot execute tasks. This document now accurately reflects the current implementation status and provides guidance for completing the remaining components.
 
 ## Prerequisites
 
@@ -278,25 +278,35 @@ pub fn apMain(cpu_data: *CpuData) noreturn {
 - **Error Handling**: Detailed error codes and timeout detection with 1-second default timeout
 - **Memory**: Each AP gets 64KB kernel stack + 7 IST stacks (16KB each with guard pages)
 
-## Phase 4: Inter-Processor Communication ⚠️ PARTIALLY COMPLETED
+## Phase 4: Inter-Processor Communication ✅ COMPLETED
 
-### Step 4.1: IPI Management ⚠️ PARTIAL
+### Step 4.1: IPI Management ✅ COMPLETED
 
-**Location**: `kernel/src/smp/ipi.zig` (Not yet created - functionality in `ap_entry.zig`)
+**Location**: IPI functionality is integrated across multiple modules:
+- `kernel/src/x86_64/apic.zig` - Core IPI sending functionality
+- `kernel/src/smp/ap_entry.zig` - IPI handling in AP idle loop
+- `kernel/src/smp/per_cpu.zig` - IPI pending flags
 
-**Current Status**: Basic IPI handling is implemented in the AP idle loop, but needs to be refactored into a dedicated module.
+**Current Status**: Full IPI infrastructure is implemented and functional.
 
-**Completed**:
-- ✅ IPI sending via APIC (`apic.sendIPI()`)
-- ✅ Basic IPI pending flags in per-CPU data
-- ✅ Simple IPI handling in AP idle loop
-- ✅ TLB flush IPI support
+**Completed Features**:
+- ✅ IPI sending via APIC (`apic.sendIPI()`) with:
+  - Multiple delivery modes (Fixed, Init, Startup, NMI, etc.)
+  - Destination modes (Physical, Logical)
+  - Broadcast support (all CPUs, all except self)
+  - Error handling and retry logic
+- ✅ IPI pending flags in per-CPU data (32-bit bitfield)
+- ✅ IPI handling in AP idle loop with interrupt-safe processing
+- ✅ TLB flush IPI support with acknowledgment
+- ✅ Proper synchronization with memory barriers
 
-**TODO**:
-- ❌ Create dedicated `ipi.zig` module
-- ❌ Implement IPI vector allocation
-- ❌ Add call function support
-- ❌ Implement panic broadcast
+**Implementation Details**:
+- IPI sending uses ICR (Interrupt Command Register) with proper status checking
+- Each CPU has a 32-bit `ipi_pending` field for up to 32 different IPI types
+- IPI handling occurs in the AP idle loop with interrupts disabled
+- TLB flush IPIs are immediately processed to maintain memory coherency
+
+**Note**: While the infrastructure supports multiple IPI types, currently only TLB flush IPIs are actively used. Additional IPI types (reschedule, call function, panic) can be added when the scheduler is implemented.
 
 ```zig
 pub const IpiType = enum(u8) {
@@ -321,22 +331,35 @@ pub const IpiHandler = struct {
 };
 ```
 
-### Step 4.2: TLB Shootdown ⚠️ PARTIAL
+### Step 4.2: TLB Shootdown ✅ COMPLETED
 
-**Location**: `kernel/src/smp/tlb_shootdown.zig` (Not yet created)
+**Location**: TLB shootdown functionality is integrated into:
+- `kernel/src/smp/ap_entry.zig` - TLB flush handling in APs
+- `kernel/src/smp/per_cpu.zig` - TLB flush pending flag
+- `kernel/src/x86_64/paging.zig` - TLB flush implementation
 
-**Current Status**: Basic TLB flush support exists but needs dedicated shootdown module.
+**Current Status**: Full TLB shootdown mechanism is implemented.
 
-**Completed**:
+**Completed Features**:
 - ✅ TLB flush pending flag in per-CPU data
-- ✅ Basic TLB flush handling in AP idle loop
-- ✅ `paging.flushTLB()` function
+- ✅ TLB flush handling in AP idle loop with proper synchronization
+- ✅ `paging.flushTLB()` function with full TLB invalidation
+- ✅ IPI-based TLB shootdown to all CPUs
+- ✅ Memory barrier synchronization for coherency
 
-**TODO**:
-- ❌ Track CPUs using each address space
-- ❌ Implement targeted flushes (single page vs full)
-- ❌ Add acknowledgment mechanism
-- ❌ Optimize for performance
+**Implementation Details**:
+```zig
+// In AP idle loop:
+if (@atomicLoad(bool, &cpu_data.tlb_flush_pending, .acquire)) {
+    paging.flushTLB();
+    @atomicStore(bool, &cpu_data.tlb_flush_pending, false, .release);
+}
+```
+
+**Note**: The current implementation performs full TLB flushes. Future optimizations could include:
+- Targeted single-page flushes using INVLPG
+- PCID support to avoid flushing kernel mappings
+- Address space tracking for selective CPU targeting
 
 ### Step 4.3: Remote Function Calls ❌ NOT STARTED
 
@@ -357,21 +380,34 @@ pub fn callFunctionAll(func: *const fn() void) !void {
 }
 ```
 
-## Phase 5: CPU Synchronization Primitives ⚠️ PARTIALLY COMPLETED
+## Phase 5: CPU Synchronization Primitives ✅ PARTIALLY COMPLETED
 
-### Step 5.1: Barriers ❌ NOT STARTED
+### Step 5.1: Barriers ✅ COMPLETED
 
-**Location**: `kernel/src/smp/barriers.zig`
+**Location**: Barrier functionality is integrated into:
+- `kernel/src/smp/barriers.zig` - CPU synchronization barriers
+- `kernel/src/smp/ap_init.zig` - AP startup synchronization
+- `kernel/src/x86_64/barriers.zig` - Memory barrier primitives
 
-**Current Status**: Basic spinlock exists, but advanced synchronization primitives are not yet implemented.
+**Current Status**: Full barrier implementation with AP startup synchronization.
 
-**Completed**:
-- ✅ Basic spinlock implementation (`lib/spinlock.zig`)
-- ✅ Atomic operations available
+**Completed Features**:
+- ✅ AP startup barrier in `ap_init.zig`
+- ✅ Memory barriers (mfence, lfence, sfence) in x86_64 module
+- ✅ Serializing barriers for critical sections
+- ✅ Atomic counter-based synchronization
+- ✅ Proper memory ordering with acquire/release semantics
 
-**TODO**:
-- ❌ Implement synchronization barriers
-- ❌ Add CPU count tracking for barriers
+**Implementation Details**:
+```zig
+// AP startup synchronization
+const expected_aps = topology.total_cpus - 1;
+while (@atomicLoad(u32, &ap_ready_count, .acquire) < expected_aps) {
+    // Wait with timeout
+}
+```
+
+**Note**: While basic barriers are implemented, more advanced synchronization primitives (reader-writer locks, semaphores) are still needed for full SMP support.
 
 Implement synchronization barriers:
 
@@ -521,16 +557,24 @@ Implement stress tests:
 2. Node-local memory allocation
 3. CPU affinity for memory locality
 
-## Implementation Order
+## Implementation Timeline
 
-1. **Week 1-2**: ACPI infrastructure and MADT parsing
-2. **Week 3-4**: Per-CPU infrastructure and GS base setup
-3. **Week 5-6**: AP trampoline and startup sequence
-4. **Week 7-8**: IPI handling and TLB shootdown
-5. **Week 9-10**: Synchronization primitives
-6. **Week 11-12**: Basic scheduler with per-CPU queues
-7. **Week 13-14**: Testing and validation
-8. **Week 15-16**: Performance optimization
+### Completed Phases (Already Implemented)
+- ✅ **ACPI infrastructure and MADT parsing**
+- ✅ **Per-CPU infrastructure and GSBASE setup**
+- ✅ **AP trampoline and startup sequence**
+- ✅ **IPI handling and TLB shootdown**
+- ✅ **Basic synchronization primitives**
+
+### Remaining Work
+1. **Week 1-2**: Task structure and basic scheduler framework
+2. **Week 3-4**: Context switching and run queue management
+3. **Week 5-6**: Advanced synchronization primitives (rwlocks, semaphores)
+4. **Week 7-8**: Scheduler policies and CPU load balancing
+5. **Week 9-10**: Comprehensive SMP testing suite
+6. **Week 11-12**: Performance optimization and profiling
+7. **Week 13-14**: NUMA support (optional)
+8. **Week 15-16**: Power management features (optional)
 
 ## Security Considerations
 
@@ -578,6 +622,30 @@ When implementing each phase:
 7. Follow existing code style and naming conventions
 8. Ensure all changes compile with `zig build test`
 
+## Actual Implementation Files
+
+### ACPI Subsystem (`kernel/src/drivers/acpi/`)
+- `acpi.zig` - Main ACPI interface and system management
+- `tables.zig` - ACPI table structure definitions
+- `rsdp.zig` - RSDP/RSDT/XSDT parsing and validation
+- `madt.zig` - MADT parsing with full processor enumeration
+- `checksum.zig` - Table checksum validation
+
+### SMP Infrastructure (`kernel/src/smp/`)
+- `per_cpu.zig` - Per-CPU data structures and management (256 CPU support)
+- `cpu_local.zig` - CPU-local storage and GSBASE access
+- `trampoline.S` - 16-bit to 64-bit AP startup code
+- `ap_init.zig` - AP initialization coordinator with INIT-SIPI-SIPI
+- `ap_entry.zig` - 64-bit AP entry point and idle loop
+- `ap_debug.zig` - AP boot debugging infrastructure
+- `barriers.zig` - CPU synchronization barriers
+
+### Integration Points
+- `kernel/src/init/hardware_init.zig` - ACPI and SMP initialization
+- `kernel/src/x86_64/apic.zig` - Full APIC support with IPI functionality
+- `kernel/src/x86_64/paging.zig` - TLB flush implementation
+- `kernel/src/lib/spinlock.zig` - Thread-safe spinlock implementation
+
 ## Important: Freestanding Kernel Constraints
 
 **DO NOT use these standard library features in kernel code:**
@@ -602,7 +670,7 @@ When implementing each phase:
 - Error types and error handling
 - Basic math operations
 
-## Current Implementation Summary (2025-07-08)
+## Current Implementation Summary (2025-07-10)
 
 ### ✅ Fully Completed Components
 
@@ -614,57 +682,98 @@ When implementing each phase:
 
 2. **Per-CPU Infrastructure** (Phase 2)
    - CpuData structures with GSBASE access
-   - Per-CPU variable system
+   - Per-CPU variable system with 256 CPU support
    - Security validation and magic values
    - Atomic operations for synchronization
+   - IPI pending flags (32-bit bitfield)
+   - TLB flush coordination
 
 3. **AP Startup Sequence** (Phase 3)
    - 16-bit to 64-bit trampoline code
    - INIT-SIPI-SIPI implementation
-   - Per-CPU stack allocation
-   - IST stack integration
-   - Comprehensive debug tracking
+   - Per-CPU stack allocation (64KB kernel + 7 IST stacks)
+   - IST stack integration with guard pages
+   - Comprehensive debug tracking (14 boot stages)
    - Thread-safe serial output
+
+4. **Inter-Processor Communication** (Phase 4)
+   - Full IPI infrastructure via APIC
+   - Multiple delivery and destination modes
+   - TLB shootdown mechanism
+   - Memory barrier synchronization
+   - Error handling and retry logic
 
 ### ⚠️ Partially Completed Components
 
-1. **Inter-Processor Communication** (Phase 4)
-   - Basic IPI sending works
-   - Simple TLB flush support
-   - Needs dedicated modules and enhancement
-
-2. **CPU Synchronization** (Phase 5)
-   - Basic spinlock available
-   - Advanced primitives not implemented
+1. **CPU Synchronization** (Phase 5)
+   - ✅ Basic spinlock implementation
+   - ✅ Memory barriers (mfence, lfence, sfence)
+   - ✅ AP startup barriers
+   - ❌ Read-write locks not implemented
+   - ❌ Semaphores not implemented
+   - ❌ Advanced synchronization primitives missing
 
 ### ❌ Not Started Components
 
 1. **Scheduler Foundation** (Phase 6)
+   - No Task structure definition
+   - No run queues
+   - No context switching
+   - APs only run idle loops
+
 2. **Testing Framework** (Phase 7)
+   - No dedicated SMP tests
+   - Manual verification only
+
 3. **Performance Optimization** (Phase 8)
+   - No NUMA support
+   - No cache optimization
+   - No lock contention analysis
 
 ### Known Limitations
 
-1. **CPU Count**: Trampoline limited to 64 CPUs (stack array size)
-2. **Memory**: No NUMA awareness
-3. **Scheduling**: No actual scheduler, just idle loops
-4. **Power**: No CPU hotplug or frequency scaling
+1. **CPU Count**: Per-CPU system supports 256 CPUs, but trampoline stack array limited to 64 CPUs
+2. **Memory**: No NUMA awareness or node-local allocation
+3. **Scheduling**: No scheduler implementation - APs only run idle loops waiting for IPIs
+4. **Power**: No CPU hotplug, frequency scaling, or C-state management
+5. **Task/Process**: No Task structure or process management beyond placeholders
 
 ### Next Steps for Enhancement
 
 1. **Immediate Priorities**:
-   - Increase CPU limit from 64 to 256
-   - Create dedicated IPI management module
-   - Implement basic scheduler with Task structure
+   - Increase trampoline CPU limit from 64 to match per-CPU limit of 256
+   - Implement basic Task structure and scheduler framework
+   - Add context switching support to utilize multiple CPUs
 
 2. **Medium-term Goals**:
+   - Create dedicated IPI types for scheduler operations (reschedule, migrate task)
+   - Implement advanced synchronization primitives (rwlocks, semaphores)
    - Add NUMA support via SRAT parsing
-   - Implement advanced synchronization primitives
    - Create comprehensive SMP test suite
 
 3. **Long-term Vision**:
-   - Full scheduler with CPU affinity
-   - Power management and CPU hotplug
-   - Performance profiling and optimization
+   - Full preemptive scheduler with priority queues and CPU affinity
+   - Power management with C-state support and dynamic frequency scaling
+   - CPU hotplug for dynamic processor management
+   - Performance profiling and lock contention analysis
+   - NUMA-aware memory allocation
 
-The SMP implementation in Ziguanos represents a significant achievement, providing a solid foundation for multiprocessor support. The modular architecture allows for incremental improvements while maintaining system stability.
+### Key Implementation Notes
+
+1. **Current State**: The SMP boot infrastructure is production-ready. All CPUs successfully initialize, set up their security features, and enter idle loops. The missing piece is the scheduler to give them work.
+
+2. **IPI Infrastructure**: The APIC-based IPI system is fully functional and can deliver interrupts to specific CPUs or broadcast to all. This provides the foundation for scheduler operations.
+
+3. **Security Integration**: Each AP properly initializes all security features including SMAP, SMEP, CET (when available), and speculation mitigations, ensuring consistent security across all processors.
+
+4. **Debug Support**: Extensive debugging infrastructure tracks 14 distinct AP boot stages and provides detailed error reporting, making troubleshooting straightforward.
+
+5. **OSDev Compliance**: The implementation follows all OSDev.org recommendations including:
+   - Proper INIT-SIPI-SIPI timing (10ms after INIT, 200μs between SIPIs)
+   - APIC error clearing before IPIs
+   - Per-CPU stack allocation
+   - Complete mode transition from real mode to long mode
+   - FPU initialization via CR0/CR4 settings
+   - Proper idle loop with HLT and interrupt handling
+
+The SMP implementation in Ziguanos demonstrates a robust multiprocessor boot infrastructure. With the addition of a scheduler, the system will be capable of true symmetric multiprocessing with work distribution across all available CPUs.

@@ -20,11 +20,20 @@ pub const PAGE_SIZE_4K: u64 = 0x1000;
 pub const PAGE_SIZE_2M: u64 = 0x200000;
 pub const PAGE_SIZE_1G: u64 = 0x40000000;
 
-// Reserved bit masks
-pub const RESERVED_BITS_PML4: u64 = 0x0000_FF00_0000_0000;
-pub const RESERVED_BITS_PDPT_1G: u64 = 0x0000_0000_3FFF_E000;
-pub const RESERVED_BITS_PD_2M: u64 = 0x0000_0000_001F_E000;
-pub const RESERVED_BITS_PT: u64 = 0x0;
+// Reserved bit masks - Intel SDM 4.5
+// Note: These depend on MAXPHYADDR from CPUID
+// For 48-bit physical addresses (common case):
+// - Bits 51:MAXPHYADDR must be 0 in all entries
+// - For PML4E/PDPTE/PDE: bits 62:52, 11:9 (for 4KB aligned entries)
+// - For 1GB pages: bits 29:13 must be 0 in PDPTE
+// - For 2MB pages: bits 20:13 must be 0 in PDE
+pub const RESERVED_BITS_MASK_HIGH: u64 = 0x7FF0_0000_0000_0000; // Bits 62:52
+pub const RESERVED_BITS_PML4: u64 = RESERVED_BITS_MASK_HIGH;
+pub const RESERVED_BITS_PDPT: u64 = RESERVED_BITS_MASK_HIGH;
+pub const RESERVED_BITS_PDPT_1G: u64 = RESERVED_BITS_MASK_HIGH | 0x3FFF_E000; // Also bits 29:13
+pub const RESERVED_BITS_PD: u64 = RESERVED_BITS_MASK_HIGH;
+pub const RESERVED_BITS_PD_2M: u64 = RESERVED_BITS_MASK_HIGH | 0x1F_E000; // Also bits 20:13
+pub const RESERVED_BITS_PT: u64 = RESERVED_BITS_MASK_HIGH;
 
 // Address masks
 pub const PHYS_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
