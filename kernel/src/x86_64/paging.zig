@@ -75,6 +75,10 @@ pub var pd_tables: [16][512]u64 align(4096) = [_][512]u64{[_]u64{0} ** 512} ** 1
 var kernel_pd: [512]u64 align(4096) = [_]u64{0} ** 512;
 var kernel_pts: [16][512]u64 align(4096) = [_][512]u64{[_]u64{0} ** 512} ** 16; // 16 PT tables = 32MB coverage
 
+// 4KB page tables for low memory fine-grained mapping (first 16MB)
+// Each PT covers 2MB, so we need 8 PTs for 16MB
+var low_mem_pts: [8][512]u64 align(4096) = [_][512]u64{[_]u64{0} ** 512} ** 8;
+
 // 5-level paging support (LA57)
 pub var pml5_table: [512]u64 align(4096) = [_]u64{0} ** 512;
 
@@ -136,6 +140,9 @@ pub fn init(boot_info: *const uefi_boot.UEFIBootInfo) void {
     @memset(&pml4_table, 0);
     @memset(&pdpt_table, 0);
     for (&pd_tables) |*table| {
+        @memset(table, 0);
+    }
+    for (&low_mem_pts) |*table| {
         @memset(table, 0);
     }
 
@@ -694,6 +701,41 @@ fn setupKernelProtection(_: *const uefi_boot.UEFIBootInfo) void {
             const min_mapping_size: u64 = 256 * 1024 * 1024; // 256MB
             const map_up_to = if (kernel_2mb_start > min_mapping_size) kernel_2mb_start else min_mapping_size;
 
+            // Map first 16MB with 4KB pages for fine-grained control (needed for SMP)
+            const low_mem_4k_size: u64 = 16 * 1024 * 1024; // 16MB
+            const low_mem_pt_count = @divFloor(low_mem_4k_size, PAGE_SIZE_2M); // 8 PT tables
+
+            // Set up 4KB pages for first 16MB
+            for (0..low_mem_pt_count) |i| {
+                const pt_phys_addr = runtime_info.getPhysicalAddress(&low_mem_pts[i]);
+                kernel_pd[i] = pt_phys_addr | PAGE_PRESENT | PAGE_WRITABLE; // Point to PT, not a huge page
+
+                // Fill the PT with 4KB pages
+                for (0..512) |j| {
+                    const page_addr = (i * PAGE_SIZE_2M) + (j * PAGE_SIZE_4K);
+                    const flags = PAGE_PRESENT | PAGE_WRITABLE;
+
+                    // Apply appropriate protections
+                    if (page_addr == 0) {
+                        // First page (0x0-0xFFF) contains AP debug area at 0x500
+                        // Must be mapped for SMP but keep NX for security
+                        low_mem_pts[i][j] = page_addr | flags | PAGE_NO_EXECUTE;
+                    } else if (page_addr == 0x8000) {
+                        // AP trampoline - needs to be executable
+                        low_mem_pts[i][j] = page_addr | flags; // No NX bit
+                    } else {
+                        // Everything else gets NX bit
+                        low_mem_pts[i][j] = page_addr | flags | PAGE_NO_EXECUTE;
+                    }
+                }
+            }
+
+            addr = low_mem_4k_size;
+            pd_idx = low_mem_pt_count;
+
+            serial.println("[PAGING] Mapped 0-0x{x:0>16} with 4KB pages for SMP support", .{low_mem_4k_size});
+
+            // Continue mapping rest of memory with 2MB pages
             while (addr < map_up_to and pd_idx < 512) {
                 // Identity mapping: virtual address = physical address
                 const phys_addr = addr; // This is critical!
@@ -1430,42 +1472,83 @@ pub fn makeRegionExecutable(start_addr: u64, size: u64) !void {
 
     serial.println("[PAGING] Making region 0x{x}-0x{x} executable", .{ aligned_start, aligned_end });
 
-    // For the trampoline at 0x8000, just handle the 2MB page directly
-    if (aligned_start < PAGE_SIZE_2M) {
-        // Get the PD entry for the first 2MB
-        const pml4_idx = 0;
-        const pdpt_idx = 0;
-        const pd_idx = 0;
+    // With our new 4KB page mapping for low memory, we can handle individual pages
+    var current_addr = aligned_start;
+    while (current_addr < aligned_end) : (current_addr += PAGE_SIZE_4K) {
+        const pml4_idx = getTableIndex(current_addr, 4);
+        const pdpt_idx = getTableIndex(current_addr, 3);
+        const pd_idx = getTableIndex(current_addr, 2);
+        const pt_idx = getTableIndex(current_addr, 1);
 
-        if ((pml4_table[pml4_idx] & PAGE_PRESENT) != 0) {
-            const pdpt_phys = pml4_table[pml4_idx] & PHYS_ADDR_MASK;
-            const pdpt = @as(*[512]u64, @ptrFromInt(pdpt_phys));
+        // Navigate through page tables
+        if ((pml4_table[pml4_idx] & PAGE_PRESENT) == 0) {
+            serial.println("[PAGING] PML4 entry not present for 0x{x}", .{current_addr});
+            continue;
+        }
 
-            if ((pdpt[pdpt_idx] & PAGE_PRESENT) != 0 and (pdpt[pdpt_idx] & PAGE_HUGE) == 0) {
-                const pd_phys = pdpt[pdpt_idx] & PHYS_ADDR_MASK;
-                const pd = @as(*[512]u64, @ptrFromInt(pd_phys));
+        const pdpt_phys = pml4_table[pml4_idx] & PHYS_ADDR_MASK;
+        const pdpt = @as(*[512]u64, @ptrFromInt(pdpt_phys));
 
-                if ((pd[pd_idx] & PAGE_PRESENT) != 0 and (pd[pd_idx] & PAGE_HUGE) != 0) {
-                    // This is a 2MB page - clear the NX bit
-                    const old_entry = pd[pd_idx];
-                    if ((old_entry & PAGE_NO_EXECUTE) != 0) {
-                        pd[pd_idx] = old_entry & ~PAGE_NO_EXECUTE;
-                        serial.println("[PAGING] Cleared NX bit on first 2MB page (was 0x{x}, now 0x{x})", .{ old_entry, pd[pd_idx] });
+        if ((pdpt[pdpt_idx] & PAGE_PRESENT) == 0) {
+            serial.println("[PAGING] PDPT entry not present for 0x{x}", .{current_addr});
+            continue;
+        }
 
-                        // Flush TLB for the entire 2MB page
-                        var flush_addr: u64 = 0;
-                        while (flush_addr < PAGE_SIZE_2M) : (flush_addr += PAGE_SIZE_4K) {
-                            invalidatePage(flush_addr);
-                        }
-                    } else {
-                        serial.println("[PAGING] First 2MB page already executable", .{});
-                    }
-                } else {
-                    serial.println("[PAGING] First 2MB not using huge page, might be using 4KB pages", .{});
+        // Check if it's a 1GB page
+        if ((pdpt[pdpt_idx] & PAGE_HUGE) != 0) {
+            serial.println("[PAGING] Cannot make executable: 1GB page at 0x{x}", .{current_addr});
+            return error.CannotModify1GBPage;
+        }
+
+        const pd_phys = pdpt[pdpt_idx] & PHYS_ADDR_MASK;
+        const pd = @as(*[512]u64, @ptrFromInt(pd_phys));
+
+        if ((pd[pd_idx] & PAGE_PRESENT) == 0) {
+            serial.println("[PAGING] PD entry not present for 0x{x}", .{current_addr});
+            continue;
+        }
+
+        // Check if it's a 2MB page
+        if ((pd[pd_idx] & PAGE_HUGE) != 0) {
+            // For 2MB pages, clear NX bit on the whole page
+            const old_entry = pd[pd_idx];
+            if ((old_entry & PAGE_NO_EXECUTE) != 0) {
+                pd[pd_idx] = old_entry & ~PAGE_NO_EXECUTE;
+                serial.println("[PAGING] Cleared NX bit on 2MB page at 0x{x}", .{current_addr});
+
+                // Flush TLB for the 2MB page
+                const mb_base = current_addr & ~@as(u64, PAGE_SIZE_2M - 1);
+                var flush_addr = mb_base;
+                while (flush_addr < mb_base + PAGE_SIZE_2M) : (flush_addr += PAGE_SIZE_4K) {
+                    invalidatePage(flush_addr);
                 }
+            }
+            // Skip to next 2MB boundary
+            current_addr = (current_addr & ~@as(u64, PAGE_SIZE_2M - 1)) + PAGE_SIZE_2M - PAGE_SIZE_4K;
+            continue;
+        }
+
+        // It's a 4KB page table
+        const pt_phys = pd[pd_idx] & PHYS_ADDR_MASK;
+        const pt = @as(*[512]u64, @ptrFromInt(pt_phys));
+
+        // Clear NX bit on the specific 4KB page
+        if ((pt[pt_idx] & PAGE_PRESENT) != 0) {
+            const old_entry = pt[pt_idx];
+            if ((old_entry & PAGE_NO_EXECUTE) != 0) {
+                pt[pt_idx] = old_entry & ~PAGE_NO_EXECUTE;
+                serial.println("[PAGING] Cleared NX bit on 4KB page at 0x{x}", .{current_addr});
+                invalidatePage(current_addr);
             }
         }
     }
+
+    // Intel SDM Vol 3A, Section 11.12: Ensure page table changes are globally visible
+    // Issue a full TLB flush to ensure all cached translations are invalidated
+    flushTLB();
+
+    // Memory barrier to ensure all page table modifications are complete
+    asm volatile ("mfence" ::: "memory");
 
     serial.println("[PAGING] Region made executable", .{});
 }

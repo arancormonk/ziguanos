@@ -108,14 +108,39 @@ pub fn initAP(cpu_id: u32, apic_id: u8) !void {
     }
 
     // Allocate stack for AP
+    // Intel SDM Vol 3A Section 8.4.5: Stack must be 16-byte aligned
     serial.println("[SMP] Allocating {} KB stack for CPU {}", .{ AP_STACK_SIZE / 1024, cpu_id });
-    const stack_bottom = heap.heapAlloc(AP_STACK_SIZE) catch |err| {
+
+    // Allocate extra space to ensure we can align to 16 bytes
+    const alloc_size = AP_STACK_SIZE + 16;
+    const raw_stack = heap.heapAlloc(alloc_size) catch |err| {
         serial.println("[SMP] Failed to allocate stack for CPU {}: {s}", .{ cpu_id, error_utils.errorToString(err) });
         ap_debug.recordApError(cpu_id, @intFromEnum(ApError.StackAllocFailed), ap_debug.DebugFlags.STACK_ERROR);
         return error.StackAllocFailed;
     };
-    const stack_top = @as([*]u8, @ptrCast(stack_bottom)) + AP_STACK_SIZE;
-    serial.println("[SMP] Stack allocated at 0x{x} - 0x{x}", .{ @intFromPtr(stack_bottom), @intFromPtr(stack_top) });
+
+    // Align the stack bottom to 16 bytes
+    const raw_addr = @intFromPtr(raw_stack);
+    const aligned_bottom = (raw_addr + 15) & ~@as(usize, 15);
+    const stack_bottom = @as([*]u8, @ptrFromInt(aligned_bottom));
+
+    // Calculate aligned stack top
+    // Intel SDM: RSP should be 16-byte aligned before CALL
+    // We'll make it (16n - 8) so after CALL it becomes 16n
+    const stack_top_aligned = aligned_bottom + AP_STACK_SIZE;
+    const stack_top = @as([*]u8, @ptrFromInt((stack_top_aligned & ~@as(usize, 15)) - 8));
+
+    serial.println("[SMP] Stack allocated at 0x{x} - 0x{x} (aligned from 0x{x})", .{ aligned_bottom, @intFromPtr(stack_top), raw_addr });
+
+    // Verify alignment
+    if (@intFromPtr(stack_bottom) & 15 != 0) {
+        serial.println("[SMP] ERROR: Stack bottom not 16-byte aligned!", .{});
+        return error.StackAlignmentError;
+    }
+    if ((@intFromPtr(stack_top) + 8) & 15 != 0) {
+        serial.println("[SMP] ERROR: Stack top not properly aligned for calls!", .{});
+        return error.StackAlignmentError;
+    }
 
     // Prepare per-CPU data
     const cpu_data = &per_cpu.cpu_data_array[cpu_id];
@@ -234,6 +259,32 @@ pub fn initAP(cpu_id: u32, apic_id: u8) !void {
         serial.print("{x:0>2} ", .{debug_region_ptr[i]});
     }
     serial.println("", .{});
+
+    // Intel SDM 11.12: Final cache coherency check before INIT-SIPI-SIPI
+    // Ensure all memory operations are complete and visible to all processors
+    asm volatile ("mfence" ::: "memory");
+
+    // Flush the trampoline area one more time to ensure coherency
+    var final_flush_addr: u64 = TRAMPOLINE_ADDR;
+    while (final_flush_addr < TRAMPOLINE_ADDR + 4096) : (final_flush_addr += 64) {
+        asm volatile ("clflush (%[addr])"
+            :
+            : [addr] "r" (final_flush_addr),
+            : "memory"
+        );
+    }
+
+    // Also flush the debug region
+    var debug_flush_addr: u64 = 0x500;
+    while (debug_flush_addr < 0x600) : (debug_flush_addr += 64) {
+        asm volatile ("clflush (%[addr])"
+            :
+            : [addr] "r" (debug_flush_addr),
+            : "memory"
+        );
+    }
+
+    asm volatile ("mfence" ::: "memory");
 
     // Debug: Check what's at the trampoline location right before SIPI
     serial.println("[SMP] Checking trampoline memory right before INIT-SIPI-SIPI...", .{});
@@ -573,6 +624,23 @@ fn setupTrampoline() !void {
         return err;
     };
 
+    // Intel SDM 11.12: Ensure page table changes are globally visible
+    // Issue memory barrier to ensure all page table writes complete
+    asm volatile ("mfence" ::: "memory");
+
+    // Intel SDM 11.12.8: Flush cache lines containing modified page tables
+    // This ensures the AP sees the updated page table entries
+    // Flush the page table entries that map the trampoline area
+    asm volatile ("clflush (%[addr])"
+        :
+        : [addr] "r" (@intFromPtr(&paging.pml4_table[0])),
+        : "memory"
+    );
+
+    // Also flush any other relevant page table structures
+    // The exact addresses depend on the page table hierarchy
+    asm volatile ("mfence" ::: "memory");
+
     // Intel SDM 11.12.4: Don't change cache attributes of active code
     // The trampoline memory should remain cacheable for proper execution
     // Cache coherency is maintained via WBINVD in sendInitSipiSipi
@@ -876,6 +944,29 @@ fn updateTrampolineData(cpu_id: u32, stack_top: [*]u8, cpu_data: *per_cpu.CpuDat
     // Update stack pointer for this CPU
     stack_array_ptr[cpu_id] = @intFromPtr(stack_top);
     serial.println("[SMP] Set ap_stack_array[{}] to 0x{x}", .{ cpu_id, @intFromPtr(stack_top) });
+
+    // Intel SDM: Verify the stack is accessible and properly mapped
+    // Write a test pattern to the stack to ensure it's writable
+    const stack_test_ptr = @as(*volatile u64, @ptrFromInt(@intFromPtr(stack_top) - 8));
+    const test_pattern: u64 = 0xDEADBEEF00000000 | @as(u64, cpu_id);
+    stack_test_ptr.* = test_pattern;
+    asm volatile ("mfence" ::: "memory");
+
+    if (stack_test_ptr.* != test_pattern) {
+        serial.println("[SMP] ERROR: Stack test failed! Wrote 0x{x}, read 0x{x}", .{ test_pattern, stack_test_ptr.* });
+        return 0; // Return error
+    }
+    serial.println("[SMP] Stack test passed for CPU {}", .{cpu_id});
+
+    // Intel SDM 11.12: Flush the cache line containing the stack array entry
+    // This ensures the AP sees the updated stack pointer
+    const stack_array_entry_addr = @intFromPtr(&stack_array_ptr[cpu_id]);
+    asm volatile ("clflush (%[addr])"
+        :
+        : [addr] "r" (stack_array_entry_addr),
+        : "memory"
+    );
+    asm volatile ("mfence" ::: "memory");
 
     // Verify the GDT hasn't been corrupted
     // GDTR is 6 bytes: 2 bytes limit + 4 bytes base
