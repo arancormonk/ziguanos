@@ -91,17 +91,17 @@ pub var debug_state: ApDebugState = .{};
 
 /// Memory location for trampoline to update stages
 /// Located at a fixed address that trampoline can write to
-/// Changed from 0x9004 to 0x6000 to avoid conflict with page tables
-pub const TRAMPOLINE_DEBUG_ADDR: u64 = 0x6000;
+/// Changed to 0x500 to use safe conventional memory (0x500-0x7BFF)
+pub const TRAMPOLINE_DEBUG_ADDR: u64 = 0x500;
 
 /// Structure at TRAMPOLINE_DEBUG_ADDR for trampoline communication
 pub const TrampolineDebug = extern struct {
-    magic: u32, // 0x12345678 to verify structure (at 0x6000)
-    cpu_id: u32, // CPU being initialized (at 0x6004)
-    stage: u8, // Current stage (ApStage enum value) (at 0x6008)
-    error_code: u8, // Error code if any (at 0x6009)
+    magic: u32, // 0x12345678 to verify structure (at 0x500)
+    cpu_id: u32, // CPU being initialized (at 0x504)
+    stage: u8, // Current stage (ApStage enum value) (at 0x508)
+    error_code: u8, // Error code if any (at 0x509)
     padding: [6]u8, // Alignment padding
-    debug_value: u64, // Additional debug value (at 0x6010)
+    debug_value: u64, // Additional debug value (at 0x510)
 };
 
 /// Check and process trampoline debug updates

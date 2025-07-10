@@ -216,10 +216,10 @@ pub fn initAP(cpu_id: u32, apic_id: u8) !void {
     // Add a full memory barrier to ensure all memory writes are visible to other CPUs
     ap_sync.memoryBarrier();
 
-    // Clear the debug memory region (0x6000) before sending INIT-SIPI-SIPI
+    // Clear the debug memory region (0x500) before sending INIT-SIPI-SIPI
     // This ensures we can detect if the AP actually writes to it
-    serial.println("[SMP] Clearing debug memory region at 0x6000...", .{});
-    const debug_region_ptr = @as([*]volatile u8, @ptrFromInt(0x6000));
+    serial.println("[SMP] Clearing debug memory region at 0x500...", .{});
+    const debug_region_ptr = @as([*]volatile u8, @ptrFromInt(0x500));
     @memset(debug_region_ptr[0..0x100], 0); // Clear 256 bytes
     asm volatile ("mfence" ::: "memory");
 
@@ -302,16 +302,16 @@ pub fn initAP(cpu_id: u32, apic_id: u8) !void {
                 asm volatile ("mfence" ::: "memory");
 
                 const debug_ptr = @as(*align(1) volatile ap_debug.TrampolineDebug, @ptrFromInt(ap_debug.TRAMPOLINE_DEBUG_ADDR));
-                const early_marker = @as(*volatile u16, @ptrFromInt(0x6FF0)).*;
-                const marker = @as(*volatile u16, @ptrFromInt(0x6FF2)).*;
+                const early_marker = @as(*volatile u16, @ptrFromInt(0x510)).*;
+                const marker = @as(*volatile u16, @ptrFromInt(0x512)).*;
                 // Read lgdt_marker as volatile to avoid interference
-                const lgdt_marker = @as(*volatile u16, @ptrFromInt(0x6FF4)).*;
-                const cr0_marker = @as(*volatile u16, @ptrFromInt(0x6FF6)).*;
-                const pm_marker = @as(*volatile u32, @ptrFromInt(0x6FFC)).*;
-                const pae_marker = @as(*volatile u32, @ptrFromInt(0x7000)).*;
-                const cr3_marker = @as(*volatile u32, @ptrFromInt(0x7004)).*;
-                const lme_marker = @as(*volatile u32, @ptrFromInt(0x7008)).*;
-                const pg_marker = @as(*volatile u32, @ptrFromInt(0x700C)).*;
+                const lgdt_marker = @as(*volatile u16, @ptrFromInt(0x514)).*;
+                const cr0_marker = @as(*volatile u16, @ptrFromInt(0x516)).*;
+                const pm_marker = @as(*volatile u32, @ptrFromInt(0x51C)).*;
+                const pae_marker = @as(*volatile u32, @ptrFromInt(0x520)).*;
+                const cr3_marker = @as(*volatile u32, @ptrFromInt(0x524)).*;
+                const lme_marker = @as(*volatile u32, @ptrFromInt(0x528)).*;
+                const pg_marker = @as(*volatile u32, @ptrFromInt(0x52C)).*;
 
                 if (debug_ptr.magic == 0x12345678 or early_marker != 0 or marker != 0 or lgdt_marker != 0 or cr0_marker != 0 or pm_marker != 0 or pae_marker != 0 or cr3_marker != 0 or lme_marker != 0 or pg_marker != 0) {
                     serial.println("[SMP] Direct debug check: magic=0x{x}, early=0x{x}, marker=0x{x}, lgdt=0x{x}, cr0=0x{x}, pm=0x{x}", .{
@@ -331,6 +331,13 @@ pub fn initAP(cpu_id: u32, apic_id: u8) !void {
                         });
                     }
                     serial.println("[SMP]   CPU={}, stage={}", .{ debug_ptr.cpu_id, debug_ptr.stage });
+
+                    // Also check for Zig entry marker at correct addresses
+                    const zig_marker = @as(*volatile u32, @ptrFromInt(0x5B0)).*;
+                    const zig_cpu_id = @as(*volatile u32, @ptrFromInt(0x5B4)).*;
+                    if (zig_marker == 0xDEADC0DE) {
+                        serial.println("[SMP]   ZIG ENTRY DETECTED! Marker=0x{x}, CPU={}", .{ zig_marker, zig_cpu_id });
+                    }
                 }
             }
         }
@@ -387,15 +394,15 @@ fn setupTrampoline() !void {
     checkMemoryPattern(TRAMPOLINE_ADDR, 256);
 
     // Also check the debug region
-    serial.println("[SMP] Checking debug region at 0x6000...", .{});
-    checkMemoryPattern(0x6000, 256);
+    serial.println("[SMP] Checking debug region at 0x500...", .{});
+    checkMemoryPattern(0x500, 256);
 
     // CRITICAL: Ensure debug regions are properly accessible with correct memory type
     // These regions must be accessible to both BSP and AP with cache coherency
     serial.println("[SMP] Verifying debug region accessibility and coherency...", .{});
 
     // First, ensure the pages are mapped
-    const debug_base: u64 = 0x6000;
+    const debug_base: u64 = 0x500;
     const debug_end: u64 = 0x8000; // Include trampoline area
 
     // Make the debug region uncacheable to avoid coherency issues
@@ -406,14 +413,14 @@ fn setupTrampoline() !void {
     };
 
     // Test the region is accessible
-    const debug_test = @as(*volatile u32, @ptrFromInt(0x6000));
+    const debug_test = @as(*volatile u32, @ptrFromInt(0x500));
     debug_test.* = 0xDEADBEEF;
     asm volatile ("mfence" ::: "memory");
     if (debug_test.* != 0xDEADBEEF) {
-        serial.println("[SMP] ERROR: Debug region at 0x6000 is not writable!", .{});
+        serial.println("[SMP] ERROR: Debug region at 0x500 is not writable!", .{});
         serial.println("[SMP]   Wrote 0xDEADBEEF, read back 0x{x}", .{debug_test.*});
     } else {
-        serial.println("[SMP] Debug region at 0x6000 is writable and coherent", .{});
+        serial.println("[SMP] Debug region at 0x500 is writable and coherent", .{});
         debug_test.* = 0; // Clear it
         asm volatile ("mfence" ::: "memory");
     }
@@ -620,9 +627,9 @@ fn setupTrampoline() !void {
     // This prevents cache coherency issues between BSP and AP
     serial.println("[SMP] Flushing debug memory regions for cache coherency", .{});
 
-    // Flush 0x6000-0x7000 region (debug area)
-    var debug_addr: u64 = 0x6000;
-    while (debug_addr <= 0x7010) : (debug_addr += 64) {
+    // Flush 0x500-0x520 region (debug area)
+    var debug_addr: u64 = 0x500;
+    while (debug_addr <= 0x558) : (debug_addr += 64) {
         asm volatile ("clflush (%[addr])"
             :
             : [addr] "r" (debug_addr),
@@ -651,9 +658,9 @@ fn setupTrampoline() !void {
 /// Find the exception handler offset in the trampoline
 fn findExceptionHandlerOffset(buffer: [*]const u8, size: usize) usize {
     // Look for the exception handler pattern:
-    // movl $0xDEADBEEF, 0x6FF8
-    // This is: C7 05 F8 6F 00 00 EF BE AD DE
-    const pattern = [_]u8{ 0xC7, 0x05, 0xF8, 0x6F, 0x00, 0x00, 0xEF, 0xBE, 0xAD, 0xDE };
+    // movl $0xDEADBEEF, 0x518
+    // This is: C7 05 18 05 00 00 EF BE AD DE
+    const pattern = [_]u8{ 0xC7, 0x05, 0x18, 0x05, 0x00, 0x00, 0xEF, 0xBE, 0xAD, 0xDE };
 
     var offset: usize = 0;
     while (offset + pattern.len <= size) : (offset += 1) {
@@ -751,6 +758,8 @@ fn updateTrampolineData(cpu_id: u32, stack_top: [*]u8, cpu_data: *per_cpu.CpuDat
     serial.println("[SMP] Set ap_pml4_addr to 0x{x}", .{pml4_addr_ptr.*});
 
     // Update entry point (64-bit virtual address)
+    // In a PIE kernel, @intFromPtr already gives us the runtime address
+    // The trampoline will jump to this address after setting up paging
     const entry_addr = @intFromPtr(&apMainEntry);
     entry_point_ptr.* = entry_addr;
     serial.println("[SMP] Set ap_entry_point to 0x{x}", .{entry_addr});
@@ -937,23 +946,23 @@ fn sendInitSipiSipi(apic_id: u8) !void {
     // Make sure these locations are accessible before writing
 
     // Clear debug markers at beginning of debug range
-    const early_marker_1 = @as(*volatile u16, @ptrFromInt(0x6FF0));
-    const early_marker_2 = @as(*volatile u16, @ptrFromInt(0x6FF2));
-    // const clear_lgdt_marker = @as(*volatile u16, @ptrFromInt(0x6FF4));
-    const clear_cr0_marker = @as(*volatile u16, @ptrFromInt(0x6FF6));
-    const clear_exception_marker = @as(*volatile u32, @ptrFromInt(0x6FF8));
-    const clear_pm_marker = @as(*volatile u32, @ptrFromInt(0x6FFC));
-    const clear_pae_marker = @as(*volatile u32, @ptrFromInt(0x7000));
-    const clear_cr3_marker = @as(*volatile u32, @ptrFromInt(0x7004));
-    const clear_lme_marker = @as(*volatile u32, @ptrFromInt(0x7008));
-    const clear_pg_marker = @as(*volatile u32, @ptrFromInt(0x700C));
-    const clear_stack_debug = @as(*volatile u64, @ptrFromInt(0x7010));
+    const early_marker_1 = @as(*volatile u16, @ptrFromInt(0x510));
+    const early_marker_2 = @as(*volatile u16, @ptrFromInt(0x512));
+    // const clear_lgdt_marker = @as(*volatile u16, @ptrFromInt(0x514));
+    const clear_cr0_marker = @as(*volatile u16, @ptrFromInt(0x516));
+    const clear_exception_marker = @as(*volatile u32, @ptrFromInt(0x518));
+    const clear_pm_marker = @as(*volatile u32, @ptrFromInt(0x51C));
+    const clear_pae_marker = @as(*volatile u32, @ptrFromInt(0x520));
+    const clear_cr3_marker = @as(*volatile u32, @ptrFromInt(0x524));
+    const clear_lme_marker = @as(*volatile u32, @ptrFromInt(0x528));
+    const clear_pg_marker = @as(*volatile u32, @ptrFromInt(0x52C));
+    const clear_stack_debug = @as(*volatile u64, @ptrFromInt(0x558));
 
-    // NOTE: Clear debug regions but avoid 0x6FF4 to prevent conflicts
-    // The AP will write to 0x6FF4 after lgdt, and we don't want to interfere
+    // NOTE: Clear debug regions but avoid 0x514 to prevent conflicts
+    // The AP will write to 0x514 after lgdt, and we don't want to interfere
     early_marker_1.* = 0;
     early_marker_2.* = 0;
-    // Skip clearing 0x6FF4 (lgdt marker) to avoid race condition
+    // Skip clearing 0x514 (lgdt marker) to avoid race condition
     clear_cr0_marker.* = 0;
     clear_exception_marker.* = 0;
     clear_pm_marker.* = 0;
@@ -967,7 +976,7 @@ fn sendInitSipiSipi(apic_id: u8) !void {
     asm volatile ("mfence; lfence" ::: "memory");
 
     // Immediately verify the clear worked
-    const verify_region = @as([*]const volatile u8, @ptrFromInt(0x6FF0));
+    const verify_region = @as([*]const volatile u8, @ptrFromInt(0x510));
     var all_zero = true;
     for (0..32) |i| {
         if (verify_region[i] != 0) {
@@ -1137,7 +1146,7 @@ fn sendInitSipiSipi(apic_id: u8) !void {
     ap_sync.memoryBarrier();
 
     // Check if AP has written to debug region immediately
-    const immediate_debug = @as(*volatile u32, @ptrFromInt(0x6000));
+    const immediate_debug = @as(*volatile u32, @ptrFromInt(0x500));
     if (immediate_debug.* == 0x12345678) {
         serial.println("[SMP] AP has written magic to debug region!", .{});
     }
@@ -1159,9 +1168,9 @@ fn sendInitSipiSipi(apic_id: u8) !void {
     asm volatile ("lfence" ::: "memory");
 
     const debug_ptr = @as(*align(1) volatile ap_debug.TrampolineDebug, @ptrFromInt(ap_debug.TRAMPOLINE_DEBUG_ADDR));
-    serial.println("[SMP] Immediate debug check at 0x6000:", .{});
-    serial.print("[SMP]   First 16 bytes at 0x6FF0: ", .{});
-    const debug_bytes = @as([*]const volatile u8, @ptrFromInt(0x6FF0));
+    serial.println("[SMP] Immediate debug check at 0x500:", .{});
+    serial.print("[SMP]   First 16 bytes at 0x510: ", .{});
+    const debug_bytes = @as([*]const volatile u8, @ptrFromInt(0x510));
     for (0..16) |i| {
         serial.print("{x:0>2} ", .{debug_bytes[i]});
     }
@@ -1173,28 +1182,105 @@ fn sendInitSipiSipi(apic_id: u8) !void {
     }
 
     // Check for simple markers
-    const early_marker_ptr = @as(*volatile u16, @ptrFromInt(0x6FF0));
-    const marker_ptr = @as(*volatile u16, @ptrFromInt(0x6FF2));
-    const lgdt_marker = @as(*volatile u16, @ptrFromInt(0x6FF4));
-    const cr0_marker = @as(*volatile u16, @ptrFromInt(0x6FF6));
-    const exception_marker = @as(*volatile u32, @ptrFromInt(0x6FF8));
-    const pm_marker = @as(*volatile u32, @ptrFromInt(0x6FFC));
-    const pae_marker = @as(*volatile u32, @ptrFromInt(0x7000));
-    const cr3_marker = @as(*volatile u32, @ptrFromInt(0x7004));
-    const lme_marker = @as(*volatile u32, @ptrFromInt(0x7008));
-    const pg_marker = @as(*volatile u32, @ptrFromInt(0x700C));
-    const stack_value = @as(*volatile u64, @ptrFromInt(0x7010));
-    serial.println("[SMP]   Early marker at 0x6FF0: 0x{x} (should be 0xDEAD if AP executed)", .{early_marker_ptr.*});
-    serial.println("[SMP]   Marker at 0x6FF2: 0x{x} (should be 0xBEEF if AP started)", .{marker_ptr.*});
-    serial.println("[SMP]   Post-lgdt marker at 0x6FF4: 0x{x} (should be 0x1111 if lgdt succeeded)", .{lgdt_marker.*});
-    serial.println("[SMP]   Post-CR0 marker at 0x6FF6: 0x{x} (should be 0x2222 if CR0 modified)", .{cr0_marker.*});
-    serial.println("[SMP]   Exception marker at 0x6FF8: 0x{x} (should be 0 if no exception)", .{exception_marker.*});
-    serial.println("[SMP]   PM entry marker at 0x6FFC: 0x{x} (should be 0x3333 if reached 32-bit mode)", .{pm_marker.*});
-    serial.println("[SMP]   PAE enabled marker at 0x7000: 0x{x} (should be 0x4444 if PAE set)", .{pae_marker.*});
-    serial.println("[SMP]   CR3 loaded marker at 0x7004: 0x{x} (should be 0x5555 if CR3 loaded)", .{cr3_marker.*});
-    serial.println("[SMP]   EFER.LME marker at 0x7008: 0x{x} (should be 0x6666 if LME set)", .{lme_marker.*});
-    serial.println("[SMP]   Paging enabled marker at 0x700C: 0x{x} (should be 0x7777 if paging on)", .{pg_marker.*});
-    serial.println("[SMP]   Stack value at 0x7010: 0x{x} (stack pointer in long mode)", .{stack_value.*});
+    const early_marker_ptr = @as(*volatile u16, @ptrFromInt(0x510));
+    const marker_ptr = @as(*volatile u16, @ptrFromInt(0x512));
+    const lgdt_marker = @as(*volatile u16, @ptrFromInt(0x514));
+    const cr0_marker = @as(*volatile u16, @ptrFromInt(0x516));
+    const exception_marker = @as(*volatile u32, @ptrFromInt(0x518));
+    const pm_marker = @as(*volatile u32, @ptrFromInt(0x51C));
+    const pae_marker = @as(*volatile u32, @ptrFromInt(0x520));
+    const cr3_marker = @as(*volatile u32, @ptrFromInt(0x524));
+    const lme_marker = @as(*volatile u32, @ptrFromInt(0x528));
+    const pg_marker = @as(*volatile u32, @ptrFromInt(0x52C));
+    const stack_value = @as(*volatile u64, @ptrFromInt(0x558));
+    serial.println("[SMP]   Early marker at 0x510: 0x{x} (should be 0xDEAD if AP executed)", .{early_marker_ptr.*});
+    serial.println("[SMP]   Marker at 0x512: 0x{x} (should be 0xBEEF if AP started)", .{marker_ptr.*});
+    serial.println("[SMP]   Post-lgdt marker at 0x514: 0x{x} (should be 0x1111 if lgdt succeeded)", .{lgdt_marker.*});
+    serial.println("[SMP]   Post-CR0 marker at 0x516: 0x{x} (should be 0x2222 if CR0 modified)", .{cr0_marker.*});
+    serial.println("[SMP]   Exception marker at 0x518: 0x{x} (should be 0 if no exception)", .{exception_marker.*});
+    serial.println("[SMP]   PM entry marker at 0x51C: 0x{x} (should be 0x3333 if reached 32-bit mode)", .{pm_marker.*});
+    serial.println("[SMP]   PAE enabled marker at 0x520: 0x{x} (should be 0x4444 if PAE set)", .{pae_marker.*});
+    serial.println("[SMP]   CR3 loaded marker at 0x524: 0x{x} (should be 0x5555 if CR3 loaded)", .{cr3_marker.*});
+    serial.println("[SMP]   EFER.LME marker at 0x528: 0x{x} (should be 0x6666 if LME set)", .{lme_marker.*});
+    serial.println("[SMP]   Paging enabled marker at 0x52C: 0x{x} (should be 0x7777 if paging on)", .{pg_marker.*});
+    serial.println("[SMP]   Stack value at 0x558: 0x{x} (stack pointer in long mode)", .{stack_value.*});
+
+    // Check 64-bit entry marker
+    const lm64_entry = @as(*volatile u32, @ptrFromInt(0x530)).*;
+    serial.println("[SMP]   64-bit entry marker at 0x530: 0x{x} (should be 0x64646464 if reached 64-bit mode)", .{lm64_entry});
+
+    // Check debug markers from assembly
+    const loaded_cpu_id = @as(*volatile u32, @ptrFromInt(0x544)).*;
+    const array_addr = @as(*volatile u64, @ptrFromInt(0x548)).*;
+    const array_offset = @as(*volatile u32, @ptrFromInt(0x550)).*;
+    const stack_loaded = @as(*volatile u32, @ptrFromInt(0x55C)).*;
+    const before_entry = @as(*volatile u32, @ptrFromInt(0x560)).*;
+    const entry_addr = @as(*volatile u64, @ptrFromInt(0x568)).*;
+    const before_jump = @as(*volatile u32, @ptrFromInt(0x570)).*;
+
+    serial.println("[SMP]   Debug markers from assembly:", .{});
+    serial.println("[SMP]     CPU ID loaded: {} (at 0x544)", .{loaded_cpu_id});
+    serial.println("[SMP]     Stack array addr: 0x{x} (at 0x548)", .{array_addr});
+    serial.println("[SMP]     Array offset: {} (at 0x550)", .{array_offset});
+    serial.println("[SMP]     Stack loaded marker: 0x{x} (at 0x55C, should be 0x8888)", .{stack_loaded});
+    serial.println("[SMP]     Before entry marker: 0x{x} (at 0x560, should be 0x9999)", .{before_entry});
+    serial.println("[SMP]     Entry point addr: 0x{x} (at 0x568)", .{entry_addr});
+    serial.println("[SMP]     Before jump marker: 0x{x} (at 0x570, should be 0xAAAA)", .{before_jump});
+    // Check the new error markers
+    const new_stack_error = @as(*volatile u32, @ptrFromInt(0x590)).*;
+    const bad_stack_value = @as(*volatile u64, @ptrFromInt(0x598)).*;
+    const new_entry_error = @as(*volatile u32, @ptrFromInt(0x59C)).*;
+    const bad_entry_value = @as(*volatile u64, @ptrFromInt(0x5A0)).*;
+
+    if (new_stack_error != 0) {
+        serial.println("[SMP]     ERROR: Stack error at 0x590: 0x{x}, bad stack value: 0x{x}", .{ new_stack_error, bad_stack_value });
+    }
+    if (new_entry_error != 0) {
+        serial.println("[SMP]     ERROR: Entry error at 0x59C: 0x{x}, bad entry value: 0x{x}", .{ new_entry_error, bad_entry_value });
+    }
+
+    // Check halt marker
+    const halt_marker = @as(*volatile u32, @ptrFromInt(0x574)).*;
+    if (halt_marker != 0) {
+        serial.println("[SMP]     Halt marker: 0x{x} (AP reached halt before jump)", .{halt_marker});
+    }
+
+    // Check debug flow markers
+    const before_delay = @as(*volatile u32, @ptrFromInt(0x534)).*;
+    const after_delay = @as(*volatile u32, @ptrFromInt(0x538)).*;
+    const after_mfence = @as(*volatile u32, @ptrFromInt(0x53C)).*;
+    const after_cpu_load = @as(*volatile u32, @ptrFromInt(0x540)).*;
+    serial.println("[SMP]   Debug flow markers:", .{});
+    serial.println("[SMP]     Before delay: 0x{x} (should be 0xDE1A1111)", .{before_delay});
+    serial.println("[SMP]     After delay: 0x{x} (should be 0xDE1A2222)", .{after_delay});
+    serial.println("[SMP]     After mfence: 0x{x} (should be 0xDE1A3333)", .{after_mfence});
+    serial.println("[SMP]     After CPU load: 0x{x} (should be 0xDE1A4444)", .{after_cpu_load});
+
+    // Check test markers
+    const test_marker = @as(*volatile u32, @ptrFromInt(0x580)).*;
+    const loop_marker = @as(*volatile u32, @ptrFromInt(0x58C)).*;
+    const read_byte = @as(*volatile u8, @ptrFromInt(0x584)).*;
+    const read_marker = @as(*volatile u32, @ptrFromInt(0x588)).*;
+    // Check for actual Zig entry markers (at different addresses)
+    const zig_marker = @as(*volatile u32, @ptrFromInt(0x5B0)).*;
+    const zig_cpu_id = @as(*volatile u32, @ptrFromInt(0x5B4)).*;
+    if (test_marker != 0) {
+        serial.println("[SMP]     Test jump marker: 0x{x} (attempting jump)", .{test_marker});
+    }
+    if (read_byte != 0 or read_marker != 0) {
+        serial.println("[SMP]     Read test: byte=0x{x}, marker=0x{x} (target address is readable!)", .{ read_byte, read_marker });
+        // The first byte should be 0x55 (push %rbp)
+        if (read_byte == 0x55) {
+            serial.println("[SMP]     First instruction is correct (push %%rbp)", .{});
+        }
+    }
+    if (loop_marker != 0) {
+        serial.println("[SMP]     Unreachable marker: 0x{x} (should not see this)", .{loop_marker});
+    }
+
+    serial.println("[SMP]   Zig entry markers:", .{});
+    serial.println("[SMP]     Marker at 0x5B0: 0x{x} (should be 0xDEADC0DE if reached Zig)", .{zig_marker});
+    serial.println("[SMP]     CPU ID at 0x5B4: {} (should match CPU ID if reached Zig)", .{zig_cpu_id});
 
     // Also dump the first part of the trampoline to verify it looks correct
     serial.println("[SMP] Trampoline first 64 bytes:", .{});
@@ -1275,6 +1361,20 @@ pub fn startAllAPs(processor_info: []const per_cpu.ProcessorInfo) !void {
 /// Entry point for APs (called from assembly trampoline)
 export fn apMainEntry(cpu_id: u32) callconv(.C) noreturn {
     // This is called with interrupts disabled
+
+    // Write immediate debug marker to verify we reached Zig code
+    // Use addresses that don't conflict with assembly debug markers
+    const marker_ptr = @as(*volatile u32, @ptrFromInt(0x5B0));
+    marker_ptr.* = 0xDEADC0DE;
+
+    // Write CPU ID to next location
+    const id_ptr = @as(*volatile u32, @ptrFromInt(0x5B4));
+    id_ptr.* = cpu_id;
+
+    // Halt here to debug
+    while (true) {
+        asm volatile ("hlt");
+    }
 
     // Add a small delay to ensure BSP has completed SIPI and released locks
     ap_sync.apStartupDelay(100_000); // 100k pause cycles

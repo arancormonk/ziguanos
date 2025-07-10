@@ -46,12 +46,12 @@ ap_rm_entry:
     mov %ax, %fs        # Clear FS
     mov %ax, %gs        # Clear GS
 
-    # Debug markers at start of debug range (0x6FF0...)
+    # Debug markers at start of debug range (0x510...)
     mov $0xDEAD, %ax
-    mov %ax, 0x6FF0
+    mov %ax, 0x510
     mov $0xBEEF, %ax
-    mov %ax, 0x6FF2
-    
+    mov %ax, 0x512
+
     # CRITICAL: Ensure stores are globally visible
     # Use serializing instruction to flush store buffer
     xor %eax, %eax
@@ -63,11 +63,11 @@ ap_rm_entry:
     jnz 3b
 
     # Debug writes to track real mode entry
-    movl $0x12345678, 0x6000       # Magic
+    movl $0x12345678, 0x500       # Magic
     movl (ap_cpu_id - ap_trampoline_start + 0x8000), %eax  # Load CPU ID from data section
-    movl %eax, 0x6004              # CPU ID
-    movb $1, 0x6008                # Stage = RealMode16
-    movb $0, 0x6009                # Error = 0
+    movl %eax, 0x504              # CPU ID
+    movb $1, 0x508                # Stage = RealMode16
+    movb $0, 0x509                # Error = 0
 
     # Intel SDM: Step 4 - Load GDT before switching to protected mode
     # The GDTR is located at a fixed offset from trampoline start
@@ -79,8 +79,8 @@ ap_rm_entry:
 1:  nop
 
     # Debug marker after lgdt
-    movw $0x1111, 0x6FF4
-    
+    movw $0x1111, 0x514
+
     # Intel SDM: Step 5 - Switch to protected mode
     # Set PE bit in CR0 to enable protected mode
     mov %cr0, %eax
@@ -88,7 +88,7 @@ ap_rm_entry:
     mov %eax, %cr0
 
     # Debug marker after enabling protected mode
-    movw $0x2222, 0x6FF6
+    movw $0x2222, 0x516
 
     # Intel SDM: Step 6 - Execute far jump to load CS with protected mode selector
     # This is REQUIRED to complete the transition to protected mode
@@ -99,7 +99,7 @@ ap_rm_entry:
 .code32
 ap_exception_handler:
     # Write exception marker
-    movl $0xDEADBEEF, 0x6FF8
+    movl $0xDEADBEEF, 0x518
     # Halt
 1:  hlt
     jmp 1b
@@ -109,7 +109,7 @@ ap_exception_handler:
 .align 16
 ap_pm_entry:
     # Debug marker for protected mode entry
-    movl $0x3333, 0x6FFC
+    movl $0x3333, 0x51C
 
     # Setup segments - CRITICAL: Must be done first in protected mode
     mov $0x10, %ax      # Data segment selector
@@ -124,11 +124,11 @@ ap_pm_entry:
     lidt (ap_idtr - ap_trampoline_start + 0x8000)
 
     # Debug writes for protected mode stage
-    movl $0x12345678, 0x6000       # Magic
+    movl $0x12345678, 0x500       # Magic
     movl (ap_cpu_id - ap_trampoline_start + 0x8000), %eax  # Load CPU ID from data section
-    movl %eax, 0x6004              # CPU ID
-    movb $2, 0x6008                # Stage = ProtectedMode32
-    movb $0, 0x6009                # Error = 0
+    movl %eax, 0x504              # CPU ID
+    movb $2, 0x508                # Stage = ProtectedMode32
+    movb $0, 0x509                # Error = 0
 
     # Intel SDM: Step 1 - Enable PAE (CR4.PAE) BEFORE any other long mode setup
     mov %cr4, %eax
@@ -136,7 +136,7 @@ ap_pm_entry:
     mov %eax, %cr4
 
     # Debug marker after PAE enabled
-    movl $0x4444, 0x7000
+    movl $0x4444, 0x520
 
     # Serializing instruction to ensure PAE is enabled
     xor %eax, %eax
@@ -148,7 +148,7 @@ ap_pm_entry:
     mov %eax, %cr3
 
     # Debug marker after CR3 loaded
-    movl $0x5555, 0x7004
+    movl $0x5555, 0x524
 
     # Intel SDM: Step 3 - Set long mode enable in EFER MSR
     # This MUST be done AFTER PAE is enabled and BEFORE paging is enabled
@@ -158,7 +158,7 @@ ap_pm_entry:
     wrmsr
 
     # Debug marker after EFER.LME set
-    movl $0x6666, 0x7008
+    movl $0x6666, 0x528
 
     # Serializing instruction after WRMSR
     xor %eax, %eax
@@ -171,7 +171,7 @@ ap_pm_entry:
     mov %eax, %cr0
 
     # Debug marker after paging enabled
-    movl $0x7777, 0x700C
+    movl $0x7777, 0x52C
 
     # Far jump to 64-bit long mode
     # Use 64-bit code segment selector (0x18)
@@ -196,12 +196,18 @@ ap_lm_entry:
     and $0x7F, %al
     out %al, %dx
 
+    # Debug: Mark that we reached 64-bit mode entry
+    movl $0x64646464, 0x530
+
     # Write debug info: LongMode64 stage (3)
-    movl $0x12345678, 0x6000       # Magic
+    movl $0x12345678, 0x500       # Magic
     movl (ap_cpu_id - ap_trampoline_start + 0x8000), %eax  # Load CPU ID from data section
-    movl %eax, 0x6004              # CPU ID
-    movb $3, 0x6008                # Stage = LongMode64
-    movb $0, 0x6009                # Error = 0
+    movl %eax, 0x504              # CPU ID
+    movb $3, 0x508                # Stage = LongMode64
+    movb $0, 0x509                # Error = 0
+
+    # Debug: Mark before delay
+    movl $0xDE1A1111, 0x534
 
     # Additional synchronization delay before accessing kernel resources
     # This gives BSP time to complete SIPI and release locks
@@ -210,29 +216,115 @@ ap_lm_entry:
     dec %rcx
     jnz 2b
 
+    # Debug: Mark after delay
+    movl $0xDE1A2222, 0x538
+
     # Memory barrier to ensure all previous operations are visible
     mfence
 
+    # Debug: Mark after mfence
+    movl $0xDE1A3333, 0x53C
+
     # Get CPU ID from startup data
     movl (ap_cpu_id - ap_trampoline_start + 0x8000), %edi  # Load CPU ID from data section
+
+    # Debug: Mark after loading CPU ID
+    movl $0xDE1A4444, 0x540
+
+    # Debug: Write CPU ID to verify we loaded it correctly
+    movl %edi, 0x544
 
     # Load stack pointer for this CPU
     # Stack addresses are stored in an array starting at ap_stack_array
     mov %edi, %eax
     shl $3, %eax       # Multiply by 8 (size of pointer)
     lea (ap_stack_array - ap_trampoline_start + 0x8000), %rcx
+
+    # Debug: Write the array address
+    movq %rcx, 0x548
+
+    # Debug: Write the offset we're using
+    movl %eax, 0x550
+
+    # Load the stack pointer
     mov (%rcx,%rax), %rsp
 
     # Store stack pointer as debug value
-    mov %rsp, 0x6010               # Debug value field
+    movq %rsp, 0x558               # Debug value field (8-byte aligned)
+
+    # Debug: Mark that we loaded stack
+    movl $0x8888, 0x55C
+
+    # Test if stack is valid (non-zero)
+    test %rsp, %rsp
+    jz stack_error
 
     # Clear base pointer
     xor %rbp, %rbp
 
+    # Debug: Mark before loading entry point
+    movl $0x9999, 0x560
+
     # Jump to kernel's AP entry point with CPU ID in RDI
     # The address is relocated and stored by BSP
-    mov (ap_entry_point - ap_trampoline_start + 0x8000), %rax
+    movq (ap_entry_point - ap_trampoline_start + 0x8000), %rax
+
+    # Debug: Write entry point address
+    movq %rax, 0x568
+
+    # Debug: Mark before jump
+    movl $0xAAAA, 0x570
+
+    # Test if entry point is valid (non-zero)
+    test %rax, %rax
+    jz entry_error
+
+    # Debug: Mark that we're about to halt
+    movl $0xDEAD0017, 0x574
+
+    # Remove the halt and try jumping to kernel
+    # Write a marker to show we're about to jump
+    movl $0x4A4D5021, 0x580  # "JMP!"
+
+    # Ensure interrupts are disabled before jump
+    cli
+    
+    # Test if we can read from the target address
+    # Try to read the first byte of the target code
+    movb (%rax), %bl
+    movb %bl, 0x584       # Store what we read
+    
+    # If we got here, the address is readable
+    movl $0x52454144, 0x588  # "READ"
+
+halt2:
+    hlt
+    jmp halt2
+
+    # Jump to kernel entry point
     jmp *%rax
+
+halt:
+    # This should never be reached
+    movl $0xDEADBEEF, 0x58C
+    hlt
+    jmp halt
+
+stack_error:
+    # Write error marker for invalid stack
+    movl $0xBAD57ACC, 0x590  # "BAD STACC" at different address
+    # Also write the bad stack value
+    movq %rsp, 0x598
+    hlt
+    jmp stack_error
+
+entry_error:
+    # Write error marker for invalid entry point
+    movl $0xBADC0DED, 0x59C  # "BAD CODED" at different address
+    # Also write the bad entry point value
+    movq %rax, 0x5A0
+    hlt
+    jmp entry_error
 
 # Data section for trampoline
 .align 16

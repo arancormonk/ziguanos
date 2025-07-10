@@ -700,10 +700,10 @@ fn loadElfSegments(
                 },
             }
         } else {
-            // Without KASLR, let UEFI choose any suitable location for PIE kernel
-            var base_addr: [*]align(4096) u8 = undefined;
+            // Without KASLR, try to allocate at the preferred address first
+            var base_addr: [*]align(4096) u8 = @ptrFromInt(lowest_vaddr);
             switch (boot_services.allocatePages(
-                .allocate_any_pages,
+                .allocate_address,
                 .loader_code,
                 contiguous_pages,
                 &base_addr,
@@ -712,13 +712,33 @@ fn loadElfSegments(
                     contiguous_allocation = base_addr;
                     allocations.contiguous_allocation = base_addr;
                     allocations.contiguous_pages = contiguous_pages;
-                    // Update KASLR offset to reflect actual load address
-                    kaslr_offset = @intFromPtr(base_addr) - lowest_vaddr;
-                    secure_debug.printAllocation("contiguous range", @intFromPtr(base_addr), contiguous_pages * 4096);
+                    // No KASLR offset when loaded at preferred address
+                    kaslr_offset = 0;
+                    secure_debug.printAllocation("contiguous range at preferred address", @intFromPtr(base_addr), contiguous_pages * 4096);
                 },
                 else => {
-                    secure_debug.printError("ContiguousAllocation", error.AllocationFailed);
-                    return error.AllocationFailed;
+                    // If preferred address fails, let UEFI choose any suitable location
+                    serial.print("[UEFI] Could not allocate at preferred address 0x{X}, trying any address\r\n", .{lowest_vaddr}) catch {};
+                    switch (boot_services.allocatePages(
+                        .allocate_any_pages,
+                        .loader_code,
+                        contiguous_pages,
+                        &base_addr,
+                    )) {
+                        .success => {
+                            contiguous_allocation = base_addr;
+                            allocations.contiguous_allocation = base_addr;
+                            allocations.contiguous_pages = contiguous_pages;
+                            // Update offset to reflect actual load address
+                            kaslr_offset = @intFromPtr(base_addr) - lowest_vaddr;
+                            serial.print("[UEFI] WARNING: Kernel loaded at 0x{X} instead of preferred 0x{X}\r\n", .{ @intFromPtr(base_addr), lowest_vaddr }) catch {};
+                            secure_debug.printAllocation("contiguous range at alternate address", @intFromPtr(base_addr), contiguous_pages * 4096);
+                        },
+                        else => {
+                            secure_debug.printError("ContiguousAllocation", error.AllocationFailed);
+                            return error.AllocationFailed;
+                        },
+                    }
                 },
             }
         }

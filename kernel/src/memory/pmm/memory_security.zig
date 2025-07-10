@@ -23,9 +23,10 @@ pub fn zeroMemoryRange(addr: u64, size: u64) void {
         return; // Silently skip zeroing protected memory
     }
 
-    // Also protect the AP debug area (0x6000-0x7000) during SMP initialization
-    const DEBUG_START: u64 = 0x6000;
-    const DEBUG_END: u64 = 0x6000 + 4096; // End of debug page
+    // Also protect the AP debug area (0x0-0x1000) during SMP initialization
+    // Using safe conventional memory area (0x500-0x7BFF)
+    const DEBUG_START: u64 = 0x0;
+    const DEBUG_END: u64 = 0x1000; // End of first page
     if (addr >= DEBUG_START and addr < DEBUG_END) {
         return; // Silently skip zeroing debug memory
     }
@@ -48,9 +49,10 @@ pub fn poisonMemoryRange(addr: u64, size: u64) void {
         return; // Silently skip poisoning protected memory
     }
 
-    // Also protect the AP debug area (0x6000-0x7000) during SMP initialization
-    const DEBUG_START: u64 = 0x6000;
-    const DEBUG_END: u64 = 0x6000 + 4096; // End of debug page
+    // Also protect the AP debug area (0x0-0x1000) during SMP initialization
+    // Using safe conventional memory area (0x500-0x7BFF)
+    const DEBUG_START: u64 = 0x0;
+    const DEBUG_END: u64 = 0x1000; // End of first page
     if (addr >= DEBUG_START and addr < DEBUG_END) {
         return; // Silently skip poisoning debug memory
     }
