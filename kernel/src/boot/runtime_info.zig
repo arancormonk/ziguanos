@@ -378,6 +378,11 @@ pub fn physicalToVirtual(phys_addr: u64) u64 {
     return phys_addr;
 }
 
+// Alias for physicalToVirtual for convenience
+pub fn physToVirt(phys_addr: u64) u64 {
+    return physicalToVirtual(phys_addr);
+}
+
 // Get runtime address considering PIE mode
 pub fn getRuntimeAddress(ptr: anytype) u64 {
     var guard = stack_security.protect();

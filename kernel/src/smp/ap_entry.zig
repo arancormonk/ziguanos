@@ -5,6 +5,7 @@ const std = @import("std");
 const gdt = @import("../x86_64/gdt.zig");
 const idt = @import("../x86_64/idt.zig");
 const apic = @import("../x86_64/apic.zig");
+const apic_unified = @import("../x86_64/apic_unified.zig");
 const cpu_init = @import("../x86_64/cpu_init.zig");
 const per_cpu = @import("per_cpu.zig");
 const cpu_local = @import("cpu_local.zig");
@@ -270,7 +271,7 @@ pub fn apPanic(msg: []const u8, error_trace: ?*std.builtin.StackTrace, ret_addr:
     // This would cause a triple fault if AP panic occurs
 
     // Notify BSP of panic (send to CPU 0)
-    _ = apic.sendIPI(0, 3, .Fixed, .Assert, .Edge, .NoShorthand) catch {};
+    apic_unified.sendIPIFull(0, 3, .Fixed, apic.IpiLevel.Assert, apic.IpiTriggerMode.Edge, .NoShorthand);
 
     // Halt forever
     while (true) {

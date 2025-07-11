@@ -36,6 +36,7 @@ pub const CPUFeatures = struct {
     avx: bool = false, // AVX
     rdrand: bool = false, // RDRAND instruction
     pcid: bool = false, // Process Context Identifiers
+    x2apic: bool = false, // x2APIC support
     xsave: bool = false, // XSAVE/XRSTOR support
     osxsave: bool = false, // OS has enabled XSAVE
     rdseed: bool = false, // RDSEED instruction
@@ -131,6 +132,7 @@ pub fn detectFeatures() void {
     cpu_features.pcid = (basic.ecx & (1 << 17)) != 0;
     cpu_features.sse41 = (basic.ecx & (1 << 19)) != 0;
     cpu_features.sse42 = (basic.ecx & (1 << 20)) != 0;
+    cpu_features.x2apic = (basic.ecx & (1 << 21)) != 0;
     cpu_features.xsave = (basic.ecx & (1 << 26)) != 0;
     cpu_features.osxsave = (basic.ecx & (1 << 27)) != 0;
     cpu_features.avx = (basic.ecx & (1 << 28)) != 0;
@@ -342,4 +344,13 @@ pub fn verifyCETConfiguration() bool {
     }
 
     return true;
+}
+
+// x2APIC support functions
+pub fn hasX2APIC() bool {
+    return cpu_features.x2apic;
+}
+
+pub fn hasAPIC() bool {
+    return cpu_features.apic;
 }

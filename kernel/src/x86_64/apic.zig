@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const cpuid = @import("cpuid.zig");
+const x2apic = @import("x2apic.zig");
 const paging = @import("paging.zig");
 const io_security = @import("io_security.zig");
 const serial = @import("../drivers/serial.zig");
@@ -440,32 +441,161 @@ pub fn init() !void {
     if (!features.apic) {
         return error.APICNotAvailable;
     }
+
+    // Check if x2APIC is already enabled
+    if (x2apic.isEnabled()) {
+        serial.println("[APIC] x2APIC already enabled, skipping xAPIC initialization", .{});
+        apic_available = false; // xAPIC MMIO not available when x2APIC is enabled
+        x2apic_available = true;
+        return;
+    }
+
     apic_available = true;
 
     // Get APIC base address and status
     apic_base = readAPICBase();
+    serial.println("[APIC] APIC base MSR value: 0x{x}", .{apic_base});
     is_bsp = (apic_base & APIC_BASE_BSP) != 0;
     const physical_base = apic_base & APIC_BASE_ADDR_MASK;
+    serial.println("[APIC] Physical base address: 0x{x}, BSP: {}", .{ physical_base, is_bsp });
+
+    // CRITICAL: Disable legacy 8259 PIC BEFORE accessing APIC MMIO
+    // According to OSDev wiki and Intel SDM, the PIC must be disabled first
+    // to prevent conflicts that can cause hangs when accessing APIC
+    serial.println("[APIC] Disabling legacy 8259 PIC before APIC initialization...", .{});
+    disablePIC();
+    serial.println("[APIC] Legacy PIC disabled", .{});
 
     // Map APIC MMIO region as uncacheable (critical for proper operation)
     // APIC registers occupy 4KB at the base address
-    paging.mapMMIORegion(physical_base, physical_base, paging.PAGE_SIZE_4K) catch |err| {
+    // For now, use identity mapping but ensure proper setup
+    const apic_virtual_base = physical_base; // Identity map for simplicity
+
+    // Map the APIC with identity mapping
+    paging.mapMMIORegion(apic_virtual_base, physical_base, paging.PAGE_SIZE_4K) catch |err| {
         serial.print("[APIC] Failed to map MMIO region: {}\r\n", .{err});
         return err;
     };
 
-    // Map APIC registers to virtual memory (identity mapped for now)
-    lapic_addr = @as([*]volatile u32, @ptrFromInt(physical_base));
+    // Add a delay after mapping to ensure all CPU caches and TLBs are synchronized
+    // This is particularly important in virtualized environments
+    serial.println("[APIC] Waiting for mapping to stabilize...", .{});
+    var delay_counter: u32 = 0;
+    while (delay_counter < 1000000) : (delay_counter += 1) {
+        asm volatile ("pause" ::: "memory");
+    }
 
-    // Enable APIC in MSR if not already enabled
+    // CRITICAL: Enable APIC in MSR before any MMIO access
+    // Some systems require the APIC to be enabled before MMIO is accessible
     if ((apic_base & APIC_BASE_ENABLE) == 0) {
+        serial.println("[APIC] APIC not enabled in MSR, enabling now...", .{});
         writeAPICBase(apic_base | APIC_BASE_ENABLE);
         apic_base = readAPICBase(); // Re-read to confirm
+        serial.println("[APIC] APIC enabled in MSR, new base: 0x{x}", .{apic_base});
+
+        // Add another delay after enabling
+        delay_counter = 0;
+        while (delay_counter < 1000000) : (delay_counter += 1) {
+            asm volatile ("pause" ::: "memory");
+        }
+    }
+
+    // Verify APIC is actually available via CPUID
+    serial.println("[APIC] Verifying APIC availability via CPUID...", .{});
+    const cpu_features = cpuid.getFeatures();
+    if (!cpu_features.apic) {
+        serial.println("[APIC] ERROR: CPUID indicates APIC is not available!", .{});
+        return error.APICNotAvailable;
+    }
+    serial.println("[APIC] CPUID confirms APIC is available", .{});
+
+    // Immediately after mapping
+    serial.println("[APIC] MMIO mapping completed. Setting lapic_addr to virtual address 0x{x}", .{apic_virtual_base});
+
+    // Map APIC registers to virtual memory
+    lapic_addr = @as([*]volatile u32, @ptrFromInt(apic_virtual_base));
+    serial.println("[APIC] lapic_addr set. Checking enable bit: 0x{x}", .{apic_base & APIC_BASE_ENABLE});
+
+    // Verify the page table mapping is correct
+    const pte = paging.getPageTableEntry(apic_virtual_base) catch |err| {
+        serial.println("[APIC] ERROR: Failed to get PTE for APIC virtual address: {}", .{err});
+        return err;
+    };
+    serial.println("[APIC] APIC PTE: 0x{x}", .{pte});
+
+    // Check if the page is present and has correct cache attributes
+    if ((pte & paging.PAGE_PRESENT) == 0) {
+        serial.println("[APIC] ERROR: APIC page not present in page tables!", .{});
+        return error.APICPageNotMapped;
+    }
+
+    if ((pte & paging.PAGE_CACHE_DISABLE) == 0) {
+        serial.println("[APIC] WARNING: APIC page not marked as uncacheable!", .{});
+    }
+
+    // Test read from a safe register to check if MMIO is accessible
+    serial.println("[APIC] Testing MMIO read...", .{});
+
+    // Add a barrier to ensure all previous memory operations complete
+    asm volatile ("mfence" ::: "memory");
+    asm volatile ("" ::: "memory"); // Compiler barrier
+
+    // First, let's try a direct read without going through readRegister
+    serial.println("[APIC] Attempting direct read from APIC virtual address...", .{});
+    const test_ptr = @as(*volatile u32, @ptrFromInt(apic_virtual_base));
+    serial.println("[APIC] Reading from virtual address 0x{x}...", .{@intFromPtr(test_ptr)});
+
+    // One more barrier before the actual read
+    asm volatile ("mfence" ::: "memory");
+
+    // Try a dummy read to a known good location first
+    const dummy_ptr = @as(*volatile u32, @ptrFromInt(0x200000)); // Kernel base
+    const dummy_read = dummy_ptr.*;
+    serial.println("[APIC] Dummy read from kernel base successful: 0x{x}", .{dummy_read});
+
+    // Now add even more serialization before APIC access
+    asm volatile ("mfence" ::: "memory");
+    asm volatile ("cpuid" ::: "eax", "ebx", "ecx", "edx", "memory");
+    asm volatile ("mfence" ::: "memory");
+
+    // Try reading from APIC MMIO
+    serial.println("[APIC] About to perform direct read...", .{});
+
+    // Verify APIC is actually enabled in the MSR
+    const msr_check = readAPICBase();
+    if ((msr_check & APIC_BASE_ENABLE) == 0) {
+        serial.println("[APIC] ERROR: APIC not enabled in MSR! MSR value: 0x{x}", .{msr_check});
+        return error.APICNotEnabled;
+    }
+    serial.println("[APIC] APIC confirmed enabled in MSR", .{});
+
+    // Add memory barrier before MMIO access
+    asm volatile ("mfence" ::: "memory");
+
+    // Add a small delay to ensure all TLB and cache updates are complete
+    // This is especially important after page splitting
+    serial.println("[APIC] Waiting for TLB/cache synchronization...", .{});
+    var sync_delay: u32 = 0;
+    while (sync_delay < 100000) : (sync_delay += 1) {
+        asm volatile ("pause" ::: "memory");
+    }
+
+    // Try a very simple inline assembly read first
+    // Use a more robust approach with proper error handling
+    serial.println("[APIC] Trying protected MMIO access...", .{});
+
+    // First, let's verify the address is correct
+    if (apic_virtual_base != 0xfee00000) {
+        serial.println("[APIC] ERROR: Unexpected APIC base address: 0x{x}", .{apic_virtual_base});
+        return error.InvalidAPICBase;
     }
 
     // Security: Clear any pending errors
+    serial.println("[APIC] Clearing Error Status Register...", .{});
     writeRegister(APIC_ESR, 0);
-    _ = readRegister(APIC_ESR);
+    serial.println("[APIC] ESR cleared, reading back...", .{});
+    const esr_value = readRegister(APIC_ESR);
+    serial.println("[APIC] ESR read back: 0x{x}", .{esr_value});
 
     // Enable APIC by setting spurious interrupt vector
     // Use vector 255 for spurious interrupts (highest priority, usually ignored)
@@ -497,8 +627,23 @@ pub fn init() !void {
         }
     }
 
-    // Disable legacy PIC if present (security: prevent dual interrupt sources)
-    disablePIC();
+    // Legacy PIC already disabled at the beginning of init()
+
+    // Test APIC access by reading back APIC ID register
+    const apic_id = readRegister(APIC_ID);
+    serial.println("[APIC] APIC access test - ID register: 0x{x:0>8} (APIC ID: {})", .{ apic_id, apic_id >> 24 });
+
+    // Test write/read with TPR
+    const original_tpr = readRegister(APIC_TPR);
+    writeRegister(APIC_TPR, 0x20);
+    const new_tpr = readRegister(APIC_TPR);
+    writeRegister(APIC_TPR, original_tpr); // Restore
+
+    if ((new_tpr & 0xFF) == 0x20) {
+        serial.println("[APIC] APIC write/read test passed (TPR: 0x{x:0>2})", .{new_tpr});
+    } else {
+        serial.println("[APIC] WARNING: APIC write/read test failed! Expected 0x20, got 0x{x:0>2}", .{new_tpr});
+    }
 }
 
 // Send End of Interrupt signal

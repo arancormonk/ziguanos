@@ -1240,6 +1240,206 @@ pub fn unmapPage(virt_addr: u64) !void {
     invalidatePage(virt_addr);
 }
 
+// Split a 1GB huge page into 512 2MB pages
+fn split1GBPage(pdpt: *[512]u64, pdpt_idx: usize) !void {
+    const entry = pdpt[pdpt_idx];
+    if ((entry & PAGE_HUGE) == 0) return; // Not a huge page
+
+    const gb_phys_base = entry & PHYS_ADDR_MASK;
+    const flags = entry & ~PHYS_ADDR_MASK & ~PAGE_HUGE;
+
+    // Intel SDM Vol 3A Section 11.12: Cache type changes require specific procedure
+    // Step 1: Disable interrupts
+    const old_flags = asm volatile ("pushfq; popq %[flags]; cli"
+        : [flags] "=r" (-> u64),
+    );
+    defer {
+        if (old_flags & 0x200 != 0) {
+            asm volatile ("sti" ::: "memory");
+        }
+    }
+
+    // Step 2: Flush caches before changing page attributes
+    asm volatile ("wbinvd" ::: "memory");
+
+    // Allocate a new PD table
+    const pd_phys = pmm.allocPagesTagged(1, .PAGE_TABLES) orelse return error.OutOfMemory;
+    serial.println("[PAGING] Allocated PD at physical 0x{x}", .{pd_phys});
+    const pd_virt = runtime_info.physToVirt(pd_phys);
+    serial.println("[PAGING] PD virtual address: 0x{x}", .{pd_virt});
+
+    // Check if this physical address is within our mapped range
+    const max_mapped_phys = 8 * PAGE_SIZE_1G; // We map 8GB initially
+    if (pd_phys >= max_mapped_phys) {
+        serial.println("[PAGING] ERROR: Allocated page table at 0x{x} is beyond mapped memory (max 0x{x})", .{ pd_phys, max_mapped_phys });
+        return error.PageTableBeyondMappedMemory;
+    }
+
+    const pd = @as(*[512]u64, @ptrFromInt(pd_virt));
+
+    // Clear the new table
+    serial.println("[PAGING] Clearing PD table...", .{});
+    @memset(pd, 0);
+    serial.println("[PAGING] PD table cleared", .{});
+
+    // Fill with 2MB pages
+    var i: usize = 0;
+    while (i < 512) : (i += 1) {
+        const mb_phys = gb_phys_base + (i * PAGE_SIZE_2M);
+        pd[i] = mb_phys | flags | PAGE_HUGE; // Keep huge bit for 2MB pages
+    }
+
+    // Update PDPT entry to point to new PD
+    const pdpt_flags = (flags & ~PAGE_HUGE);
+    pdpt[pdpt_idx] = pd_phys | pdpt_flags;
+
+    // Memory barrier to ensure page table changes are visible
+    asm volatile ("mfence" ::: "memory");
+
+    // Step 3: Flush TLB for the entire 1GB region
+    flushTLB(); // Full TLB flush for safety with huge page changes
+
+    // Step 4: Flush caches again after page table changes
+    asm volatile ("wbinvd" ::: "memory");
+
+    // Additional serialization after huge page split
+    asm volatile ("mfence" ::: "memory");
+    asm volatile ("cpuid" ::: "eax", "ebx", "ecx", "edx", "memory");
+
+    serial.println("[PAGING] Split 1GB page at PDPT index {} into 2MB pages", .{pdpt_idx});
+
+    // Verify the split was successful
+    const new_entry = pdpt[pdpt_idx];
+    serial.println("[PAGING] New PDPT[{}] entry after split: 0x{x}", .{ pdpt_idx, new_entry });
+
+    // Additional verification: ensure the PD is accessible and properly mapped
+    const verify_pd = @as(*[512]u64, @ptrFromInt(pd_virt));
+    const first_pd_entry = verify_pd[0];
+    serial.println("[PAGING] Verified PD[0] after split: 0x{x}", .{first_pd_entry});
+
+    // Ensure the split preserved the identity mapping
+    const expected_phys = gb_phys_base;
+    const actual_phys = first_pd_entry & PHYS_ADDR_MASK;
+    if (actual_phys != expected_phys) {
+        serial.println("[PAGING] ERROR: PD[0] physical address mismatch after split!", .{});
+        serial.println("[PAGING] Expected: 0x{x}, Actual: 0x{x}", .{ expected_phys, actual_phys });
+    }
+    if ((new_entry & PAGE_HUGE) != 0) {
+        serial.println("[PAGING] ERROR: PDPT entry still has huge page bit set!", .{});
+    }
+}
+
+// Split a 2MB huge page into 512 4KB pages
+fn split2MBPageAt(pd: *[512]u64, pd_idx: usize, pd_virt_base: u64) !void {
+    const entry = pd[pd_idx];
+    if ((entry & PAGE_HUGE) == 0) return; // Not a huge page
+
+    const mb_phys_base = entry & PHYS_ADDR_MASK;
+    const flags = entry & ~PHYS_ADDR_MASK & ~PAGE_HUGE;
+
+    // Intel SDM Vol 3A Section 11.12: Cache type changes require specific procedure
+    // Step 1: Disable interrupts
+    const old_flags = asm volatile ("pushfq; popq %[flags]; cli"
+        : [flags] "=r" (-> u64),
+    );
+    defer {
+        if (old_flags & 0x200 != 0) {
+            asm volatile ("sti" ::: "memory");
+        }
+    }
+
+    // Step 2: Flush caches before changing page attributes
+    asm volatile ("wbinvd" ::: "memory");
+
+    // Allocate a new PT table
+    const pt_phys = pmm.allocPagesTagged(1, .PAGE_TABLES) orelse return error.OutOfMemory;
+    serial.println("[PAGING] Allocated PT at physical 0x{x}", .{pt_phys});
+    const pt_virt = runtime_info.physToVirt(pt_phys);
+    serial.println("[PAGING] PT virtual address: 0x{x}", .{pt_virt});
+
+    // Check if this physical address is within our mapped range
+    const max_mapped_phys = 8 * PAGE_SIZE_1G; // We map 8GB initially
+    if (pt_phys >= max_mapped_phys) {
+        serial.println("[PAGING] ERROR: Allocated page table at 0x{x} is beyond mapped memory (max 0x{x})", .{ pt_phys, max_mapped_phys });
+        return error.PageTableBeyondMappedMemory;
+    }
+
+    const pt = @as(*[512]u64, @ptrFromInt(pt_virt));
+
+    // Clear the new table
+    serial.println("[PAGING] Clearing PT table...", .{});
+    @memset(pt, 0);
+    serial.println("[PAGING] PT table cleared", .{});
+
+    // Fill with 4KB pages
+    var i: usize = 0;
+    while (i < 512) : (i += 1) {
+        const kb_phys = mb_phys_base + (i * PAGE_SIZE_4K);
+        const pt_flags = flags;
+        pt[i] = kb_phys | pt_flags; // No huge bit for 4KB pages
+    }
+
+    // Update PD entry to point to new PT
+    const pd_flags = (flags & ~PAGE_HUGE);
+    pd[pd_idx] = pt_phys | pd_flags;
+
+    // Memory barrier to ensure page table changes are visible
+    asm volatile ("mfence" ::: "memory");
+
+    // Step 3: Flush TLB for the entire 2MB region
+    const mb_virt = pd_virt_base + (pd_idx * PAGE_SIZE_2M);
+    var flush_addr = mb_virt;
+    const mb_end = mb_virt + PAGE_SIZE_2M;
+    while (flush_addr < mb_end) : (flush_addr += PAGE_SIZE_4K) {
+        invalidatePage(flush_addr);
+    }
+
+    // Step 4: Flush caches again after page table changes
+    asm volatile ("wbinvd" ::: "memory");
+
+    // Additional serialization after huge page split
+    asm volatile ("mfence" ::: "memory");
+    asm volatile ("cpuid" ::: "eax", "ebx", "ecx", "edx", "memory");
+
+    serial.println("[PAGING] Split 2MB page at PD index {} (virt 0x{x}) into 4KB pages", .{ pd_idx, mb_virt });
+
+    // Verify the split was successful
+    const new_entry = pd[pd_idx];
+    serial.println("[PAGING] New PD[{}] entry after split: 0x{x}", .{ pd_idx, new_entry });
+    if ((new_entry & PAGE_HUGE) != 0) {
+        serial.println("[PAGING] ERROR: PD entry still has huge page bit set!", .{});
+    }
+
+    // Additional verification: ensure the PT is accessible and properly mapped
+    const verify_pt = @as(*[512]u64, @ptrFromInt(pt_virt));
+    const first_pt_entry = verify_pt[0];
+    serial.println("[PAGING] Verified PT[0] after split: 0x{x}", .{first_pt_entry});
+
+    // Verify a specific entry for APIC if this is the APIC page
+    if (mb_virt == 0xfee00000) {
+        const apic_pt_idx = 0; // APIC is at the start of this 2MB region
+        const apic_entry = verify_pt[apic_pt_idx];
+        serial.println("[PAGING] APIC PT entry after split: 0x{x}", .{apic_entry});
+
+        // For MMIO regions, we need to ensure all pages in the PT have proper cache settings
+        // Update all entries to have cache-disable for the entire 2MB region
+        serial.println("[PAGING] Updating entire 2MB region for MMIO compatibility", .{});
+        var j: usize = 0;
+        while (j < 512) : (j += 1) {
+            const kb_phys = mb_phys_base + (j * PAGE_SIZE_4K);
+            // Set cache-disable for all pages in MMIO region
+            verify_pt[j] = kb_phys | PAGE_PRESENT | PAGE_WRITABLE | PAGE_CACHE_DISABLE;
+        }
+        // Flush entire 2MB region
+        var mmio_flush_addr = mb_virt;
+        const flush_end = mb_virt + PAGE_SIZE_2M;
+        while (mmio_flush_addr < flush_end) : (mmio_flush_addr += PAGE_SIZE_4K) {
+            invalidatePage(mmio_flush_addr);
+        }
+        serial.println("[PAGING] Updated all PT entries for MMIO region", .{});
+    }
+}
+
 // Map a page with specific permissions
 // This is a simplified version - a full implementation would handle page table allocation
 pub fn mapPage(virt_addr: u64, phys_addr: u64, flags: u64) !void {
@@ -1270,7 +1470,9 @@ pub fn mapPage(virt_addr: u64, phys_addr: u64, flags: u64) !void {
     }
 
     if ((pdpt[pdpt_idx] & PAGE_HUGE) != 0) {
-        return error.PageSizeConflict; // Can't map 4K page in 1GB region
+        // Split the 1GB page into 2MB pages
+        try split1GBPage(pdpt, pdpt_idx);
+        // Now it should be a normal PD pointer, not a huge page
     }
 
     const pd_phys = pdpt[pdpt_idx] & PHYS_ADDR_MASK;
@@ -1281,7 +1483,10 @@ pub fn mapPage(virt_addr: u64, phys_addr: u64, flags: u64) !void {
     }
 
     if ((pd[pd_idx] & PAGE_HUGE) != 0) {
-        return error.PageSizeConflict; // Can't map 4K page in 2MB region
+        // Split the 2MB page into 4KB pages
+        const pd_virt_base = pdpt_idx * PAGE_SIZE_1G;
+        try split2MBPageAt(pd, pd_idx, pd_virt_base);
+        // Now it should be a normal PT pointer, not a huge page
     }
 
     const pt_phys = pd[pd_idx] & PHYS_ADDR_MASK;
@@ -1289,10 +1494,15 @@ pub fn mapPage(virt_addr: u64, phys_addr: u64, flags: u64) !void {
 
     // Map the page
     pt[pt_idx] = phys_addr | flags;
+    serial.println("[PAGING] Mapped page: virt=0x{x} -> phys=0x{x}, flags=0x{x}, PTE=0x{x}", .{ virt_addr, phys_addr, flags, pt[pt_idx] });
 
     // Flush TLB entry with memory barrier
     asm volatile ("mfence" ::: "memory");
     invalidatePage(virt_addr);
+
+    // Verify the mapping is accessible by doing a test read of the PTE
+    const verify_pte = pt[pt_idx];
+    serial.println("[PAGING] Verified PTE readback: 0x{x}", .{verify_pte});
 }
 
 // Map a page with raw page table entry value (for special page types like shadow stack)
@@ -1322,7 +1532,9 @@ pub fn mapPageRaw(virt_addr: u64, raw_entry: u64) !void {
     }
 
     if ((pdpt[pdpt_idx] & PAGE_HUGE) != 0) {
-        return error.PageSizeConflict; // Can't map 4K page in 1GB region
+        // Split the 1GB page into 2MB pages
+        try split1GBPage(pdpt, pdpt_idx);
+        // Now it should be a normal PD pointer, not a huge page
     }
 
     const pd_phys = pdpt[pdpt_idx] & PHYS_ADDR_MASK;
@@ -1333,7 +1545,10 @@ pub fn mapPageRaw(virt_addr: u64, raw_entry: u64) !void {
     }
 
     if ((pd[pd_idx] & PAGE_HUGE) != 0) {
-        return error.PageSizeConflict; // Can't map 4K page in 2MB region
+        // Split the 2MB page into 4KB pages
+        const pd_virt_base = pdpt_idx * PAGE_SIZE_1G;
+        try split2MBPageAt(pd, pd_idx, pd_virt_base);
+        // Now it should be a normal PT pointer, not a huge page
     }
 
     const pt_phys = pd[pd_idx] & PHYS_ADDR_MASK;
@@ -1771,6 +1986,33 @@ pub fn mapMMIORegion(virt_addr: u64, phys_addr: u64, size: usize) !void {
 
     serial.println("[PAGING] Mapping MMIO region: virt=0x{x}, phys=0x{x}, size=0x{x} ({} pages)", .{ virt_addr, phys_addr, size, page_count });
 
+    // Check if this region is already mapped
+    if (getPageTableEntry(virt_addr)) |existing_pte| {
+        serial.println("[PAGING] WARNING: Page already mapped with PTE: 0x{x}", .{existing_pte});
+        const existing_phys = existing_pte & PHYS_ADDR_MASK;
+
+        // Check if it's mapped to the correct address with correct cache attributes
+        const has_cache_disable = (existing_pte & PAGE_CACHE_DISABLE) != 0;
+        const has_nx_bit = (existing_pte & PAGE_NO_EXECUTE) != 0;
+
+        if (existing_phys == phys_addr and has_cache_disable and !has_nx_bit) {
+            serial.println("[PAGING] Already mapped correctly for MMIO, skipping", .{});
+            return;
+        }
+
+        if (existing_phys != phys_addr) {
+            serial.println("[PAGING] Page mapped to different address (0x{x}), remapping...", .{existing_phys});
+        } else {
+            serial.println("[PAGING] Page has incorrect attributes (cache_disable={}, nx={}), remapping...", .{ has_cache_disable, has_nx_bit });
+        }
+    } else |err| {
+        if (err == error.PageNotMapped) {
+            serial.println("[PAGING] Page not currently mapped, proceeding with mapping", .{});
+        } else {
+            serial.println("[PAGING] Error checking existing mapping: {}", .{err});
+        }
+    }
+
     // Map each page with uncacheable flags
     var offset: usize = 0;
     while (offset < size) : (offset += PAGE_SIZE_4K) {
@@ -1779,24 +2021,27 @@ pub fn mapMMIORegion(virt_addr: u64, phys_addr: u64, size: usize) !void {
 
         // Use cache-disable and write-through for MMIO regions
         // This ensures all reads/writes go directly to the device
-        const mmio_flags = PAGE_PRESENT | PAGE_WRITABLE | PAGE_NO_EXECUTE |
-            PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH;
+        // Note: Don't set PAGE_NO_EXECUTE for MMIO as it can cause issues
+        // For APIC specifically, we need strong uncacheable (UC) not write-combining
+        const mmio_flags = if (phys_addr == 0xfee00000) blk: {
+            // APIC requires strong uncacheable (UC) - PAT index 0
+            // This means PCD=1, PWT=0 (not both set)
+            serial.println("[PAGING] Using strong UC for APIC MMIO", .{});
+            break :blk PAGE_PRESENT | PAGE_WRITABLE | PAGE_CACHE_DISABLE;
+        } else blk: {
+            // Other MMIO can use UC- (uncacheable minus) - PAT index 3
+            break :blk PAGE_PRESENT | PAGE_WRITABLE | PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH;
+        };
 
-        // Try to map the page - if it already exists, update its flags
+        // Map the page - mapPage now handles huge page splitting automatically
         mapPage(current_virt, current_phys, mmio_flags) catch |err| {
             if (err == error.PageTableNotPresent) {
                 // Page table doesn't exist, this is more complex
                 // For now, we assume early boot has set up necessary page tables
                 serial.println("[PAGING] WARNING: Page table not present for MMIO mapping at 0x{x}", .{current_virt});
                 return err;
-            } else if (err == error.PageSizeConflict) {
-                // There's a large page here, we need to split it
-                // For now, just update the flags if the mapping already exists
-                updatePageFlags(current_virt, mmio_flags) catch |update_err| {
-                    serial.println("[PAGING] Failed to update MMIO flags at 0x{x}: {}", .{ current_virt, update_err });
-                    return update_err;
-                };
             } else {
+                serial.println("[PAGING] Failed to map MMIO page at 0x{x}: {}", .{ current_virt, err });
                 return err;
             }
         };
@@ -1804,6 +2049,32 @@ pub fn mapMMIORegion(virt_addr: u64, phys_addr: u64, size: usize) !void {
 
     // Ensure all CPUs see the mapping changes
     asm volatile ("mfence" ::: "memory");
+
+    // After splitting huge pages and mapping MMIO, we need a full TLB flush
+    // This is critical for MMIO regions after page size changes
+    serial.println("[PAGING] Performing full TLB flush after MMIO mapping...", .{});
+    flushTLB();
+
+    // Additional synchronization for APIC MMIO
+    if (phys_addr == 0xfee00000) {
+        // For APIC, we need extra care with TLB and cache coherency
+        asm volatile ("mfence" ::: "memory");
+        asm volatile ("wbinvd" ::: "memory"); // Flush all caches
+        asm volatile ("mfence" ::: "memory");
+
+        // Verify the mapping one more time
+        if (getPageTableEntry(virt_addr)) |final_pte| {
+            serial.println("[PAGING] Final APIC PTE after all flushes: 0x{x}", .{final_pte});
+            if ((final_pte & PAGE_CACHE_DISABLE) == 0) {
+                serial.println("[PAGING] ERROR: APIC page still not uncacheable after mapping!", .{});
+                return error.APICMappingFailed;
+            }
+        } else |_| {}
+    }
+
+    // Additional serialization to ensure all memory operations complete
+    asm volatile ("mfence" ::: "memory");
+    asm volatile ("" ::: "memory"); // Compiler barrier
 
     serial.println("[PAGING] MMIO region mapped successfully", .{});
 }

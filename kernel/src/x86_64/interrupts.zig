@@ -8,6 +8,7 @@ const std = @import("std");
 const serial = @import("../drivers/serial.zig");
 const exceptions = @import("exceptions.zig");
 const apic = @import("apic.zig");
+const x2apic = @import("x2apic.zig");
 const cfi = @import("cfi.zig");
 const stack_security = @import("stack_security.zig");
 const speculation = @import("speculation.zig");
@@ -108,8 +109,12 @@ export fn handleInterrupt(vector: u64, error_code: u64, frame: *exceptions.Inter
     }
 
     // Send EOI to APIC for hardware interrupts
-    if (apic.isAvailable() and vector >= 32) {
-        apic.sendEOI();
+    if (vector >= 32) {
+        if (x2apic.isEnabled()) {
+            x2apic.sendEOI();
+        } else if (apic.isAvailable()) {
+            apic.sendEOI();
+        }
     }
 
     // Apply MDS mitigation if returning to user mode

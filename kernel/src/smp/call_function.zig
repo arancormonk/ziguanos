@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const per_cpu = @import("per_cpu.zig");
-const apic = @import("../x86_64/apic.zig");
+const apic_unified = @import("../x86_64/apic_unified.zig");
 const spinlock = @import("../lib/spinlock.zig");
 const serial = @import("../drivers/serial.zig");
 const timer = @import("../x86_64/timer.zig");
@@ -131,7 +131,7 @@ pub fn callFunctionSingle(cpu_id: u32, func: *const fn () void) !void {
 
     // Send IPI if not already pending
     if ((old_pending & (1 << 2)) == 0) {
-        try apic.sendIPI(@intCast(target_cpu_data.apic_id), CALL_FUNCTION_VECTOR);
+        apic_unified.sendIPI(@intCast(target_cpu_data.apic_id), CALL_FUNCTION_VECTOR, .Fixed, .NoShorthand);
     }
 
     // Update statistics
@@ -199,9 +199,7 @@ pub fn callFunctionAll(func: *const fn () void) !void {
 
         // Send IPI if not already pending
         if ((old_pending & (1 << 2)) == 0) {
-            apic.sendIPI(@intCast(target_cpu_data.apic_id), CALL_FUNCTION_VECTOR) catch |err| {
-                serial.println("[IPI] Failed to send IPI to CPU {}: {}", .{ cpu_id, err });
-            };
+            apic_unified.sendIPI(@intCast(target_cpu_data.apic_id), CALL_FUNCTION_VECTOR, .Fixed, .NoShorthand);
         }
     }
 

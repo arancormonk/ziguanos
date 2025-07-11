@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 const std = @import("std");
-const apic = @import("../x86_64/apic.zig");
+const apic_unified = @import("../x86_64/apic_unified.zig");
 const interrupts = @import("../x86_64/interrupts.zig");
 const per_cpu = @import("per_cpu.zig");
 const serial = @import("../drivers/serial.zig");
@@ -51,8 +51,8 @@ pub fn sendTo(target_cpu: u32, vector: u8) void {
         return;
     };
 
-    // Send IPI via APIC
-    apic.sendIPI(cpu_data.apic_id, vector, .Fixed, .Physical);
+    // Send IPI via unified APIC interface
+    apic_unified.sendIPI(cpu_data.apic_id, vector, .Fixed, .NoShorthand);
 }
 
 // Send IPI to all CPUs except self
@@ -68,7 +68,7 @@ pub fn sendToAllButSelf(vector: u8) void {
     _ = @atomicRmw(u64, &ipi_stats.sent[vector_idx], .Add, cpu_count - 1, .monotonic);
 
     // Send to all other CPUs
-    apic.sendIPI(0, vector, .Fixed, .AllExcludingSelf);
+    apic_unified.sendIPI(0, vector, .Fixed, .AllExcludingSelf);
 }
 
 // Send IPI to all CPUs including self
@@ -84,7 +84,7 @@ pub fn sendToAll(vector: u8) void {
     _ = @atomicRmw(u64, &ipi_stats.sent[vector_idx], .Add, cpu_count, .monotonic);
 
     // Send to all CPUs
-    apic.sendIPI(0, vector, .Fixed, .All);
+    apic_unified.sendIPI(0, vector, .Fixed, .All);
 }
 
 // TLB shootdown handler
@@ -96,7 +96,7 @@ fn handleTlbShootdown(frame: *interrupts.InterruptFrame) void {
     asm volatile ("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
 
     // Send EOI
-    apic.sendEOI();
+    apic_unified.sendEOI();
 }
 
 // Reschedule handler
@@ -107,7 +107,7 @@ fn handleReschedule(frame: *interrupts.InterruptFrame) void {
     // TODO: Trigger scheduler when implemented
 
     // Send EOI
-    apic.sendEOI();
+    apic_unified.sendEOI();
 }
 
 // Call function handler
@@ -119,7 +119,7 @@ fn handleCallFunction(frame: *interrupts.InterruptFrame) void {
     call_function.processPendingCalls();
 
     // Send EOI
-    apic.sendEOI();
+    apic_unified.sendEOI();
 }
 
 // Panic handler - stop this CPU

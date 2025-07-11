@@ -3,6 +3,8 @@
 
 // Re-export all x86_64 components
 pub const apic = @import("x86_64/apic.zig");
+pub const x2apic = @import("x86_64/x2apic.zig");
+pub const apic_unified = @import("x86_64/apic_unified.zig");
 pub const cfi = @import("x86_64/cfi.zig");
 pub const cfi_exception = @import("x86_64/cfi_exception.zig");
 pub const cpu_init = @import("x86_64/cpu_init.zig");

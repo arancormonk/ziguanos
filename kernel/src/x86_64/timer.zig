@@ -3,6 +3,8 @@
 
 const std = @import("std");
 const apic = @import("apic.zig");
+const x2apic = @import("x2apic.zig");
+const apic_unified = @import("apic_unified.zig");
 const cpuid = @import("cpuid.zig");
 const interrupts = @import("interrupts.zig");
 const serial = @import("../drivers/serial.zig");
@@ -106,7 +108,11 @@ pub fn init() void {
     }
 
     // Try to use APIC timer if available
-    if (apic.isAvailable()) {
+    if (x2apic.isEnabled()) {
+        initX2APICTimer();
+        timer_source.store(TIMER_SOURCE_APIC, .release);
+        serial.println("[TIMER] Using x2APIC timer", .{});
+    } else if (apic.isAvailable()) {
         initAPICTimer();
         timer_source.store(TIMER_SOURCE_APIC, .release);
         serial.println("[TIMER] Using APIC timer", .{});
@@ -253,6 +259,36 @@ fn initAPICTimer() void {
     apic.setTimerInitialCount(initial_count);
 }
 
+// Initialize x2APIC timer
+fn initX2APICTimer() void {
+    var guard = stack_security.protect();
+    defer guard.deinit();
+
+    // Verify we're running at ring 0
+    const cs = asm volatile ("mov %%cs, %[result]"
+        : [result] "=r" (-> u16),
+    );
+    const cpl: u2 = @truncate(cs & 0x3);
+    if (cpl != 0) {
+        serial.println("[TIMER] ERROR: x2APIC timer init requires ring 0, current CPL={}", .{cpl});
+        return;
+    }
+
+    serial.println("[TIMER] Initializing x2APIC timer...", .{});
+
+    // Install interrupt handler for timer (vector 32)
+    interrupts.set_handler(32, timerInterruptHandler);
+
+    // Calibrate the x2APIC timer
+    const initial_count = calibrateX2APICTimer();
+
+    // Configure x2APIC timer for periodic mode
+    x2apic.initTimer(32, x2apic.TimerMode.Periodic, x2apic.TimerDivide.Div16);
+    x2apic.setTimerInitialCount(initial_count);
+
+    serial.println("[TIMER] x2APIC timer initialized with count: {}", .{initial_count});
+}
+
 // Calibrate APIC timer against PIT
 fn calibrateAPICTimer() u32 {
     var guard = stack_security.protect();
@@ -274,18 +310,18 @@ fn calibrateAPICTimer() u32 {
     serial.println("[TIMER] PIT calibration: {} ms, {} PIT ticks", .{ calibration_ms, pit_ticks });
 
     // Set APIC timer to maximum count with divisor but MASKED during calibration
-    apic.setTimerDivider(apic_timer_divisor);
+    apic_unified.setTimerDivider(apic_timer_divisor);
 
     // Debug: Check what divisor was actually set
     const APIC_TIMER_DIVIDE = 0x3E0;
-    const actual_divisor = apic.readRegister(APIC_TIMER_DIVIDE);
+    const actual_divisor = apic_unified.readRegister(APIC_TIMER_DIVIDE);
     serial.println("[TIMER] Set divisor {}, actual register value: 0x{x}", .{ apic_timer_divisor, actual_divisor });
 
     // Temporarily mask the timer during calibration to prevent interrupts
     const apic_timer_masked = 32 | (1 << 16); // Vector 32 + masked bit
     const APIC_TIMER_LVT = 0x320; // APIC Timer Local Vector Table offset
-    apic.writeRegister(APIC_TIMER_LVT, apic_timer_masked);
-    apic.setTimerInitialCount(0xFFFFFFFF);
+    apic_unified.writeRegister(APIC_TIMER_LVT, apic_timer_masked);
+    apic_unified.setTimerInitialCount(0xFFFFFFFF);
 
     // Configure PIT for calibration
     asm volatile ("outb %[val], %[port]"
@@ -382,6 +418,123 @@ fn calibrateAPICTimer() u32 {
     serial.println("[TIMER] APIC timer calibrated: {} ticks for {}Hz", .{ initial_count, TIMER_FREQUENCY });
 
     // Return the calculated initial count
+    return @intCast(initial_count);
+}
+
+// Calibrate x2APIC timer against PIT
+fn calibrateX2APICTimer() u32 {
+    var guard = stack_security.protect();
+    defer guard.deinit();
+
+    // Verify we're running at ring 0
+    const cs = asm volatile ("mov %%cs, %[result]"
+        : [result] "=r" (-> u16),
+    );
+    const cpl: u2 = @truncate(cs & 0x3);
+    if (cpl != 0) {
+        serial.println("[TIMER] ERROR: x2APIC calibration requires ring 0, current CPL={}", .{cpl});
+        return 0;
+    }
+
+    const calibration_ms: u32 = 10;
+    const pit_ticks = (PIT_FREQUENCY * calibration_ms) / 1000;
+    serial.println("[TIMER] x2APIC calibration: {} ms, {} PIT ticks", .{ calibration_ms, pit_ticks });
+
+    // Set x2APIC timer to maximum count with divisor
+    x2apic.initTimer(32, x2apic.TimerMode.OneShot, x2apic.TimerDivide.Div16);
+    x2apic.setTimerInitialCount(0xFFFFFFFF);
+
+    // Configure PIT for calibration
+    asm volatile ("outb %[val], %[port]"
+        :
+        : [val] "{al}" (@as(u8, 0xB0)),
+          [port] "N{dx}" (PIT_COMMAND),
+    );
+
+    const count = @as(u16, @intCast(pit_ticks & 0xFFFF));
+    asm volatile ("outb %[val], %[port]"
+        :
+        : [val] "{al}" (@as(u8, @truncate(count & 0xFF))),
+          [port] "N{dx}" (PIT_CHANNEL2),
+    );
+    asm volatile ("outb %[val], %[port]"
+        :
+        : [val] "{al}" (@as(u8, @truncate(count >> 8))),
+          [port] "N{dx}" (PIT_CHANNEL2),
+    );
+
+    // Start PIT
+    var port61 = asm volatile ("inb %[port], %[result]"
+        : [result] "={al}" (-> u8),
+        : [port] "N{dx}" (PIT_CONTROL),
+    );
+    port61 = (port61 & 0xFC) | 0x01;
+    asm volatile ("outb %[val], %[port]"
+        :
+        : [val] "{al}" (port61),
+          [port] "N{dx}" (PIT_CONTROL),
+    );
+
+    // Record x2APIC timer start
+    const apic_start = x2apic.getTimerCurrentCount();
+
+    // Wait for PIT
+    var pit_loops: u32 = 0;
+    while (true) {
+        port61 = asm volatile ("inb %[port], %[result]"
+            : [result] "={al}" (-> u8),
+            : [port] "N{dx}" (PIT_CONTROL),
+        );
+        pit_loops += 1;
+        if ((port61 & 0x20) != 0) break;
+
+        // Safety check
+        if (pit_loops > 10000000) {
+            serial.println("[TIMER] ERROR: PIT calibration timeout!", .{});
+            break;
+        }
+    }
+    serial.println("[TIMER] PIT calibration loops: {}", .{pit_loops});
+
+    // Record x2APIC timer end
+    const apic_end = x2apic.getTimerCurrentCount();
+
+    // Calculate ticks
+    const apic_ticks = apic_start - apic_end;
+    serial.println("[TIMER] x2APIC calibration: start={}, end={}, ticks={}", .{ apic_start, apic_end, apic_ticks });
+
+    // Calculate frequency
+    const ticks_per_ms = apic_ticks / calibration_ms;
+    const apic_freq = std.math.mul(u64, ticks_per_ms, 1000) catch {
+        serial.println("[TIMER] ERROR: x2APIC frequency overflow during calibration", .{});
+        return 0;
+    };
+
+    // Validate frequency
+    const min_apic_freq: u64 = 1_000_000; // 1 MHz minimum
+    const max_apic_freq: u64 = 1_000_000_000; // 1 GHz maximum
+
+    if (apic_freq < min_apic_freq or apic_freq > max_apic_freq) {
+        serial.println("[TIMER] ERROR: x2APIC frequency {} Hz outside reasonable range", .{apic_freq});
+        return 0;
+    }
+
+    serial.println("[TIMER] x2APIC frequency: {} Hz", .{apic_freq});
+
+    // Calculate initial count
+    const initial_count = apic_freq / TIMER_FREQUENCY;
+
+    // Validate initial count
+    if (initial_count > std.math.maxInt(u32)) {
+        serial.println("[TIMER] ERROR: x2APIC initial count {} exceeds 32-bit limit", .{initial_count});
+        return std.math.maxInt(u32);
+    }
+
+    // Stop the timer after calibration
+    x2apic.setTimerInitialCount(0);
+
+    serial.println("[TIMER] x2APIC timer calibrated: {} ticks for {}Hz", .{ initial_count, TIMER_FREQUENCY });
+
     return @intCast(initial_count);
 }
 

@@ -5,6 +5,8 @@ const std = @import("std");
 const serial = @import("../drivers/serial.zig");
 const interrupts = @import("../x86_64/interrupts.zig");
 const apic = @import("../x86_64/apic.zig");
+const x2apic = @import("../x86_64/x2apic.zig");
+const apic_unified = @import("../x86_64/apic_unified.zig");
 const timer = @import("../x86_64/timer.zig");
 const acpi = @import("../drivers/acpi/acpi.zig");
 const heap = @import("../memory/heap.zig");
@@ -72,30 +74,56 @@ pub fn init() void {
         }
     }
 
-    // Initialize APIC if available
-    apic.init() catch |err| {
-        serial.println("[KERNEL] APIC init failed: {s}", .{error_utils.errorToString(err)});
-        serial.println("[KERNEL] Falling back to legacy PIC mode", .{});
-        serial.flush();
-    };
-
-    if (apic.isAvailable()) {
-        apic.printInfo();
-        serial.println("[KERNEL] APIC initialized successfully", .{});
-
-        // Intel SDM 10.4.1: BSP flag is set in IA32_APIC_BASE MSR
-        // Update BSP's APIC ID now that APIC is initialized
-        const APIC_ID_REG = 0x20; // APIC ID register offset
-        const apic_id = @as(u8, @truncate(apic.readRegister(APIC_ID_REG) >> 24));
-        per_cpu.updateBspApicId(apic_id);
-        serial.println("[KERNEL] BSP APIC ID updated: {d}", .{apic_id});
-        serial.flush();
-
-        // Test APIC functionality
-        apic.testAPIC() catch |err| {
-            serial.println("[KERNEL] APIC test failed: {s}", .{error_utils.errorToString(err)});
+    // Try x2APIC first if supported
+    var using_x2apic = false;
+    if (x2apic.isSupported()) {
+        serial.println("[KERNEL] x2APIC supported, attempting to enable...", .{});
+        x2apic.init() catch |err| {
+            serial.println("[KERNEL] x2APIC init failed: {s}", .{error_utils.errorToString(err)});
+            serial.println("[KERNEL] Falling back to xAPIC mode", .{});
             serial.flush();
         };
+
+        if (x2apic.isEnabled()) {
+            using_x2apic = true;
+            serial.println("[KERNEL] x2APIC initialized successfully", .{});
+
+            // Update BSP's APIC ID using x2APIC
+            const apic_id = @as(u8, @truncate(x2apic.getAPICID()));
+            per_cpu.updateBspApicId(apic_id);
+            serial.println("[KERNEL] BSP APIC ID (x2APIC): {d}", .{apic_id});
+
+            // Dump x2APIC state for debugging
+            x2apic.dumpState();
+            serial.flush();
+        }
+    }
+
+    // Fall back to xAPIC if x2APIC failed or not supported
+    if (!using_x2apic) {
+        apic.init() catch |err| {
+            serial.println("[KERNEL] APIC init failed: {s}", .{error_utils.errorToString(err)});
+            serial.println("[KERNEL] Falling back to legacy PIC mode", .{});
+            serial.flush();
+        };
+
+        if (apic.isAvailable()) {
+            apic.printInfo();
+            serial.println("[KERNEL] APIC initialized successfully", .{});
+
+            // Intel SDM 10.4.1: BSP flag is set in IA32_APIC_BASE MSR
+            // Update BSP's APIC ID now that APIC is initialized
+            const apic_id = @as(u8, @truncate(apic_unified.getAPICID()));
+            per_cpu.updateBspApicId(apic_id);
+            serial.println("[KERNEL] BSP APIC ID updated: {d}", .{apic_id});
+            serial.flush();
+
+            // Test APIC functionality
+            apic.testAPIC() catch |err| {
+                serial.println("[KERNEL] APIC test failed: {s}", .{error_utils.errorToString(err)});
+                serial.flush();
+            };
+        }
     }
 
     // Initialize timer subsystem (handles both APIC and PIT)
@@ -146,7 +174,12 @@ pub fn init() void {
 pub fn prepareForInterrupts() void {
     // Mask all interrupts except timer before enabling
     serial.println("[KERNEL] Masking spurious interrupts...", .{});
-    apic.maskAllInterrupts();
+    if (x2apic.isEnabled()) {
+        // x2APIC handles masking through initialization
+        serial.println("[KERNEL] x2APIC mode - interrupts already masked", .{});
+    } else {
+        apic.maskAllInterrupts();
+    }
 }
 
 /// Enable interrupts

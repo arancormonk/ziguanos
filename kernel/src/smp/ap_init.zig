@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const apic = @import("../x86_64/apic.zig");
+const apic_unified = @import("../x86_64/apic_unified.zig");
 const paging = @import("../x86_64/paging.zig");
 const pmm = @import("../memory/pmm.zig");
 const per_cpu = @import("per_cpu.zig");
@@ -1234,7 +1235,7 @@ fn sendInitSipiSipi(apic_id: u8) !void {
     }
 
     // Verify this CPU's APIC ID
-    const bsp_apic_id = apic.getID();
+    const bsp_apic_id = @as(u8, @truncate(apic_unified.getAPICID()));
     serial.println("[SMP] BSP APIC ID: {}, Target AP APIC ID: {}", .{ bsp_apic_id, apic_id });
     if (bsp_apic_id == apic_id) {
         serial.println("[SMP] ERROR: Trying to send IPI to self!", .{});
@@ -1242,12 +1243,12 @@ fn sendInitSipiSipi(apic_id: u8) !void {
     }
 
     // Check APIC state before sending INIT
-    const esr_before = apic.readRegister(0x280); // APIC_ESR
+    const esr_before = apic_unified.readRegister(0x280); // APIC_ESR
     if (esr_before != 0) {
         serial.println("[SMP] WARNING: APIC ESR=0x{x} before INIT", .{esr_before});
         // Clear ESR
-        apic.writeRegister(0x280, 0);
-        _ = apic.readRegister(0x280);
+        apic_unified.writeRegister(0x280, 0);
+        _ = apic_unified.readRegister(0x280);
     }
 
     // Intel SDM Table 10-1: Send INIT IPI
@@ -1255,12 +1256,12 @@ fn sendInitSipiSipi(apic_id: u8) !void {
 
     // Intel SDM 10.4.3: Send INIT-deassert first for legacy compatibility
     // This ensures the AP is in a known state
-    try apic.sendIPI(apic_id, 0, .Init, .Deassert, .Level, .NoShorthand);
+    apic_unified.sendIPIFull(apic_id, 0, .Init, .Deassert, .Level, .NoShorthand);
     busyWait(10000); // Short delay
 
     // Intel SDM: Send the actual INIT assert IPI
     // Format: 000C4500H (as shown in Table 10-1)
-    try apic.sendIPI(apic_id, 0, .Init, .Assert, .Edge, .NoShorthand);
+    apic_unified.sendIPIFull(apic_id, 0, .Init, .Assert, .Edge, .NoShorthand);
 
     // Intel SDM 10.4.4: Wait 10ms after INIT IPI
     serial.println("[SMP] Waiting 10ms after INIT...", .{});
@@ -1270,12 +1271,12 @@ fn sendInitSipiSipi(apic_id: u8) !void {
     ap_sync.apStartupDelay(10_000);
 
     // Check ICR status after INIT
-    const icr_after_init = apic.readRegister(0x300); // APIC_ICR_LOW
+    const icr_after_init = apic_unified.readRegister(0x300); // APIC_ICR_LOW
     serial.println("[SMP] ICR after INIT wait: 0x{x}", .{icr_after_init});
 
     // Wait for delivery status to clear
     var wait_count: u32 = 0;
-    while ((apic.readRegister(0x300) & (1 << 12)) != 0 and wait_count < 1000) {
+    while ((apic_unified.readRegister(0x300) & (1 << 12)) != 0 and wait_count < 1000) {
         busyWait(1000);
         wait_count += 1;
     }
@@ -1328,7 +1329,7 @@ fn sendInitSipiSipi(apic_id: u8) !void {
     // WORKAROUND: Some systems require a small delay before SIPI
     busyWait(1000);
 
-    try apic.sendIPI(apic_id, 0x08, .Startup, .Assert, .Edge, .NoShorthand);
+    apic_unified.sendIPIFull(apic_id, 0x08, .Startup, .Assert, .Edge, .NoShorthand);
 
     // Intel SDM 10.4.4: Wait 200us between SIPIs
     serial.println("[SMP] Waiting 200us between SIPIs...", .{});
@@ -1352,7 +1353,7 @@ fn sendInitSipiSipi(apic_id: u8) !void {
         }
     }
 
-    try apic.sendIPI(apic_id, 0x08, .Startup, .Assert, .Edge, .NoShorthand);
+    apic_unified.sendIPIFull(apic_id, 0x08, .Startup, .Assert, .Edge, .NoShorthand);
 
     // Add a delay after second SIPI to ensure it completes and avoid race
     ap_sync.apStartupDelay(50_000); // 50k pause cycles
