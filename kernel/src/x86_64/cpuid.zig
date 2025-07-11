@@ -16,6 +16,7 @@ pub const CPUFeatures = struct {
     // Basic features (EDX from leaf 1)
     fpu: bool = false, // x87 FPU
     pse: bool = false, // Page Size Extension
+    tsc: bool = false, // Time Stamp Counter
     pae: bool = false, // Physical Address Extension
     msr: bool = false, // Model Specific Registers
     apic: bool = false, // APIC
@@ -114,6 +115,7 @@ pub fn detectFeatures() void {
     // Parse EDX
     cpu_features.fpu = (basic.edx & (1 << 0)) != 0;
     cpu_features.pse = (basic.edx & (1 << 3)) != 0;
+    cpu_features.tsc = (basic.edx & (1 << 4)) != 0;
     cpu_features.pae = (basic.edx & (1 << 6)) != 0;
     cpu_features.msr = (basic.edx & (1 << 5)) != 0;
     cpu_features.apic = (basic.edx & (1 << 9)) != 0;

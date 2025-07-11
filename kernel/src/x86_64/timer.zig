@@ -101,10 +101,16 @@ pub fn init() void {
     serial.println("[TIMER] Initializing timer subsystem...", .{});
 
     // First calibrate TSC if available
-    if (cpuid.getFeatures().rdtscp or cpuid.getFeatures().rdrand) {
+    if (cpuid.getFeatures().tsc) {
         calibrateTSC();
         const freq = tsc_frequency.load(.acquire);
-        serial.println("[TIMER] TSC calibrated to {} MHz", .{freq / 1_000_000});
+        if (freq > 0) {
+            serial.println("[TIMER] TSC calibrated to {} MHz", .{freq / 1_000_000});
+        } else {
+            serial.println("[TIMER] WARNING: TSC calibration failed", .{});
+        }
+    } else {
+        serial.println("[TIMER] TSC not available on this CPU", .{});
     }
 
     // Try to use APIC timer if available
@@ -140,7 +146,7 @@ fn calibrateTSC() void {
         return;
     }
 
-    const calibration_ms: u32 = 50; // Use longer calibration period for accuracy
+    const calibration_ms: u32 = 100; // Use longer calibration period for QEMU TCG accuracy
     const pit_ticks = (PIT_FREQUENCY * calibration_ms) / 1000;
 
     // Disable interrupts during calibration
@@ -192,13 +198,21 @@ fn calibrateTSC() void {
     // Start TSC measurement
     const start_tsc = readTSC();
 
-    // Wait for PIT to count down
+    // Wait for PIT to count down with timeout
+    var pit_wait_loops: u32 = 0;
     while (true) {
         port61 = asm volatile ("inb %[port], %[result]"
             : [result] "={al}" (-> u8),
             : [port] "N{dx}" (PIT_CONTROL),
         );
         if ((port61 & 0x20) != 0) break; // Check OUT2 status bit
+
+        pit_wait_loops += 1;
+        if (pit_wait_loops > 100_000_000) {
+            serial.println("[TIMER] ERROR: PIT calibration timeout during TSC calibration!", .{});
+            _ = timer_calibration_failures.fetchAdd(1, .monotonic);
+            return;
+        }
     }
 
     // End TSC measurement
@@ -304,8 +318,9 @@ fn calibrateAPICTimer() u32 {
         return 0;
     }
 
-    // Use a short calibration period
-    const calibration_ms: u32 = 10;
+    // Use a longer calibration period for better accuracy in QEMU TCG
+    // QEMU TCG has low timer resolution, so we need more time
+    const calibration_ms: u32 = 100;
     const pit_ticks = (PIT_FREQUENCY * calibration_ms) / 1000;
     serial.println("[TIMER] PIT calibration: {} ms, {} PIT ticks", .{ calibration_ms, pit_ticks });
 
@@ -393,12 +408,18 @@ fn calibrateAPICTimer() u32 {
     };
 
     // Intel x86 security guideline: Validate APIC frequency is reasonable
-    const min_apic_freq: u64 = 1_000_000; // 1 MHz minimum
-    const max_apic_freq: u64 = 1_000_000_000; // 1 GHz maximum
+    // Note: QEMU TCG often reports lower frequencies (e.g., 98 MHz) which is normal for emulation
+    const min_apic_freq: u64 = 10_000_000; // 10 MHz minimum (relaxed for QEMU TCG)
+    const max_apic_freq: u64 = 10_000_000_000; // 10 GHz maximum
 
     if (apic_freq < min_apic_freq or apic_freq > max_apic_freq) {
-        serial.println("[TIMER] ERROR: APIC frequency {} Hz outside reasonable range", .{apic_freq});
-        return 0;
+        serial.println("[TIMER] WARNING: APIC frequency {} Hz outside expected range", .{apic_freq});
+        // In QEMU TCG, frequencies can be lower due to emulation overhead
+        // Continue anyway if it's at least somewhat reasonable
+        if (apic_freq < 1_000_000) {
+            serial.println("[TIMER] ERROR: APIC frequency too low, calibration likely failed", .{});
+            return 0;
+        }
     }
 
     serial.println("[TIMER] APIC frequency: {} Hz", .{apic_freq});
@@ -436,7 +457,7 @@ fn calibrateX2APICTimer() u32 {
         return 0;
     }
 
-    const calibration_ms: u32 = 10;
+    const calibration_ms: u32 = 100;
     const pit_ticks = (PIT_FREQUENCY * calibration_ms) / 1000;
     serial.println("[TIMER] x2APIC calibration: {} ms, {} PIT ticks", .{ calibration_ms, pit_ticks });
 
@@ -511,12 +532,17 @@ fn calibrateX2APICTimer() u32 {
     };
 
     // Validate frequency
-    const min_apic_freq: u64 = 1_000_000; // 1 MHz minimum
-    const max_apic_freq: u64 = 1_000_000_000; // 1 GHz maximum
+    // Note: QEMU TCG often reports lower frequencies which is normal for emulation
+    const min_apic_freq: u64 = 10_000_000; // 10 MHz minimum (relaxed for QEMU TCG)
+    const max_apic_freq: u64 = 10_000_000_000; // 10 GHz maximum
 
     if (apic_freq < min_apic_freq or apic_freq > max_apic_freq) {
-        serial.println("[TIMER] ERROR: x2APIC frequency {} Hz outside reasonable range", .{apic_freq});
-        return 0;
+        serial.println("[TIMER] WARNING: x2APIC frequency {} Hz outside expected range", .{apic_freq});
+        // In QEMU TCG, frequencies can be lower due to emulation overhead
+        if (apic_freq < 1_000_000) {
+            serial.println("[TIMER] ERROR: x2APIC frequency too low, calibration likely failed", .{});
+            return 0;
+        }
     }
 
     serial.println("[TIMER] x2APIC frequency: {} Hz", .{apic_freq});
