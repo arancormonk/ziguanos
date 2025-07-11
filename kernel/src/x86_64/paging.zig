@@ -473,8 +473,15 @@ fn setupIdentityMapping(boot_info: *const uefi_boot.UEFIBootInfo) usize {
                         );
                     }
                 }
+            } else if (i == 3) {
+                // 4th GB (0xC0000000-0xFFFFFFFF) contains MMIO regions
+                // APIC at 0xFEE00000, IO-APIC at 0xFEC00000, etc.
+                // Map with cache-disable for MMIO compatibility
+                // Note: MMIO regions should NOT have NX bit set
+                serial.println("[PAGING] GB 3 contains MMIO regions (APIC) - setting cache-disable, no NX", .{});
+                pdpt_table[i] = phys_addr | PAGE_PRESENT | PAGE_WRITABLE | PAGE_HUGE | PAGE_CACHE_DISABLE;
             } else {
-                // Non-kernel GB - use 1GB page with NX
+                // Non-kernel, non-MMIO GB - use 1GB page with NX
                 pdpt_table[i] = phys_addr | PAGE_PRESENT | PAGE_WRITABLE | PAGE_HUGE | PAGE_NO_EXECUTE;
             }
 
@@ -523,13 +530,21 @@ fn setupIdentityMapping(boot_info: *const uefi_boot.UEFIBootInfo) usize {
 
         // Set up PD entries with 2MB pages
         var phys_addr: u64 = 0;
-        for (pd_tables[0..max_gbs]) |*pd_table| {
+        for (pd_tables[0..max_gbs], 0..) |*pd_table, gb_index| {
             for (&pd_table.*) |*entry| {
                 var flags = PAGE_PRESENT | PAGE_WRITABLE | PAGE_HUGE;
 
                 // Always apply NX bit to large pages - we'll use fine-grained
                 // permissions for kernel regions later
                 flags |= PAGE_NO_EXECUTE;
+
+                // Check if this is in the 4th GB which contains MMIO regions
+                if (gb_index == 3) {
+                    // 4th GB contains APIC at 0xFEE00000, IO-APIC at 0xFEC00000
+                    // Set cache-disable for MMIO compatibility and remove NX bit
+                    flags |= PAGE_CACHE_DISABLE;
+                    flags &= ~PAGE_NO_EXECUTE; // MMIO regions should be executable
+                }
 
                 entry.* = phys_addr | flags;
                 phys_addr += PAGE_SIZE_2M;
