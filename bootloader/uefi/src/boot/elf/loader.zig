@@ -1,9 +1,6 @@
 // Copyright 2025 arancormonk
 // SPDX-License-Identifier: MIT
 
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2024 Ziguanos. All rights reserved.
-
 // ELF Loader Module
 //
 // This module handles the loading and validation of ELF kernel files.
