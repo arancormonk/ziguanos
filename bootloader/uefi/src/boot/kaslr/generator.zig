@@ -531,6 +531,8 @@ pub fn getRandomOffset(boot_services: *uefi.tables.BootServices) !u64 {
         serial.print("[UEFI] KASLR range: {} MB, alignment: {} KB, ~{} bits of entropy ({} possible positions)\r\n", .{ kaslr_range / (1024 * 1024), alignment / 1024, entropy_bits, num_positions }) catch {};
     }
 
+    serial.print("[UEFI] KASLR: About to get random value...\r\n", .{}) catch {};
+
     // Warn if below recommended entropy
     if (entropy_bits < config.KASLR_RECOMMENDED_ENTROPY_BITS) {
         serial.print("[UEFI] WARNING: KASLR entropy below recommended level ({} bits < {} recommended)\r\n", .{ entropy_bits, config.KASLR_RECOMMENDED_ENTROPY_BITS }) catch {};
@@ -584,13 +586,22 @@ pub fn getRandomOffset(boot_services: *uefi.tables.BootServices) !u64 {
     var hardware_rng_used = false;
 
     // Try to get RNG protocol
+    serial.print("[UEFI] KASLR: Attempting to locate UEFI RNG protocol...\r\n", .{}) catch {};
     switch (boot_services.locateProtocol(&rng_guid, null, @ptrCast(&rng_protocol))) {
         .success => {
-            // RNG protocol available, get random number
-            const get_random = @as(*const fn (*anyopaque, usize, [*]u8) callconv(.C) uefi.Status, @ptrCast(@alignCast(rng_protocol)));
-            _ = get_random(rng_protocol, 8, @ptrCast(&random_value));
-            hardware_rng_used = true;
-            serial.print("[UEFI] KASLR: Using UEFI RNG protocol\r\n", .{}) catch {};
+            serial.print("[UEFI] KASLR: RNG protocol located, about to call it...\r\n", .{}) catch {};
+
+            // Use our centralized RNG module instead of direct protocol calls
+            const rng_result = rng.getRandom64();
+            if (rng_result.success) {
+                random_value = rng_result.value;
+                hardware_rng_used = true;
+                serial.print("[UEFI] KASLR: Successfully got random value from RNG module\r\n", .{}) catch {};
+            } else {
+                // Shouldn't happen but fallback to TSC
+                random_value = collector.readTsc();
+                serial.print("[UEFI] KASLR: RNG module failed, using TSC\r\n", .{}) catch {};
+            }
 
             // Still collect multiple entropy sources for boot entropy
             const entropy_sources = [_]u64{
@@ -605,16 +616,17 @@ pub fn getRandomOffset(boot_services: *uefi.tables.BootServices) !u64 {
             crypto.collectBootEntropy(&entropy_sources, hardware_rng_used);
         },
         else => {
-            // Fallback: try hardware RNG instructions first
-            // Use our RNG module which tries RDSEED first, then RDRAND
-            if (rng.getRandom(u64)) |value| {
-                random_value = value;
+            // Fallback: use our safer RNG module
+            serial.print("[UEFI] KASLR: UEFI RNG protocol not available, using fallback\r\n", .{}) catch {};
+            const rng_result = rng.getRandom64();
+            if (rng_result.success) {
+                random_value = rng_result.value;
                 hardware_rng_used = true;
-                serial.print("[UEFI] KASLR: Using hardware RNG\r\n", .{}) catch {};
-            } else |_| {
-                // Final fallback: use TSC and other entropy sources
+                serial.print("[UEFI] KASLR: Using RNG module\r\n", .{}) catch {};
+            } else {
+                // This should never happen with our new implementation
                 random_value = collector.readTsc();
-                serial.print("[UEFI] KASLR: Using TSC as entropy source\r\n", .{}) catch {};
+                serial.print("[UEFI] KASLR: Using TSC as final fallback\r\n", .{}) catch {};
             }
 
             // Collect multiple entropy sources (Intel-recommended)

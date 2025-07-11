@@ -743,8 +743,33 @@ pub fn storeKernelHMAC(runtime_services: *uefi.tables.RuntimeServices, hmac_valu
     serial.print("\r\n", .{}) catch {};
 }
 
+// Check if RDRAND is supported
+fn hasRdrand() bool {
+    // Check CPUID function 1, ECX bit 30
+    var eax: u32 = 1;
+    var ebx: u32 = undefined;
+    var ecx: u32 = undefined;
+    var edx: u32 = undefined;
+
+    asm volatile (
+        \\cpuid
+        : [eax] "={eax}" (eax),
+          [ebx] "={ebx}" (ebx),
+          [ecx] "={ecx}" (ecx),
+          [edx] "={edx}" (edx),
+        : [eax_in] "{eax}" (eax),
+    );
+
+    return (ecx & (1 << 30)) != 0;
+}
+
 // Enhanced RDRAND implementation with entropy conditioning
 fn rdrand64() ?u64 {
+    // First check if RDRAND is available
+    if (!hasRdrand()) {
+        return null;
+    }
+
     var result: u64 = undefined;
     var cf: u8 = undefined;
     var retry_count: u32 = 0;
@@ -797,29 +822,69 @@ fn getTSCValue() u64 {
 
 // Get performance counter for additional entropy
 fn getPerformanceCounter() u64 {
-    var result: u64 = undefined;
+    // RDPMC is typically not available in UEFI environment
+    // Use alternative entropy sources instead
+    var entropy: u64 = 0;
 
-    // Use performance counter 0 if available
-    asm volatile (
-        \\rdpmc
-        : [result] "={rax}" (result),
-        : [counter] "{rcx}" (0),
-        : "cc", "rdx"
-    );
+    // Mix in stack pointer
+    const stack_ptr = @intFromPtr(&entropy);
+    entropy ^= stack_ptr;
 
-    return result;
+    // Mix in code pointer
+    const code_ptr = @intFromPtr(&getPerformanceCounter);
+    entropy ^= code_ptr;
+
+    // Mix in TSC if available
+    entropy ^= getTSCValue();
+
+    // Simple bit mixing
+    entropy = (entropy ^ (entropy >> 30)) *% 0xbf58476d1ce4e5b9;
+    entropy = (entropy ^ (entropy >> 27)) *% 0x94d049bb133111eb;
+    entropy = entropy ^ (entropy >> 31);
+
+    return entropy;
+}
+
+// Generate fallback entropy using various sources
+fn generateFallbackEntropy() u64 {
+    var entropy: u64 = 0;
+
+    // Mix in TSC
+    entropy ^= getTSCValue();
+
+    // Mix in memory addresses
+    const stack_addr = @intFromPtr(&entropy);
+    const code_addr = @intFromPtr(&generateFallbackEntropy);
+
+    entropy ^= stack_addr;
+    entropy ^= code_addr << 16;
+
+    // Mix in performance counter substitute
+    entropy ^= getPerformanceCounter();
+
+    // Apply mixing function
+    entropy = (entropy ^ (entropy >> 30)) *% 0xbf58476d1ce4e5b9;
+    entropy = (entropy ^ (entropy >> 27)) *% 0x94d049bb133111eb;
+    entropy = entropy ^ (entropy >> 31);
+
+    return entropy;
 }
 
 // Generate secure random HMAC key using enhanced hardware RNG
 pub fn generateHMACKey() ![32]u8 {
     var key: [32]u8 = undefined;
     var entropy_quality_score: u32 = 0;
+    var using_fallback = false;
 
     // Generate 256 bits of random data with quality assessment
     for (0..4) |i| {
-        const rand64 = rdrand64() orelse {
-            serial.print("[UEFI] ERROR: Failed to generate random data for HMAC key (attempt {})\r\n", .{i + 1}) catch {};
-            return error.RNGFailure;
+        const rand64 = rdrand64() orelse blk: {
+            // Fallback to software entropy
+            if (!using_fallback) {
+                serial.print("[UEFI] WARNING: Hardware RNG not available, using fallback entropy\r\n", .{}) catch {};
+                using_fallback = true;
+            }
+            break :blk generateFallbackEntropy();
         };
 
         // Assess entropy quality (basic check for obvious patterns)

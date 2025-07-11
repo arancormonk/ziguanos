@@ -102,10 +102,34 @@ pub fn cpuHasRdseed() bool {
     return (ebx & (1 << 18)) != 0;
 }
 
+/// Check if we're running under hypervisor
+fn isVirtualized() bool {
+    var eax: u32 = 1;
+    var ebx: u32 = undefined;
+    var ecx: u32 = undefined;
+    var edx: u32 = undefined;
+
+    asm volatile ("cpuid"
+        : [eax] "+{eax}" (eax),
+          [ebx] "={ebx}" (ebx),
+          [ecx] "+{ecx}" (ecx),
+          [edx] "={edx}" (edx),
+    );
+
+    return (ecx & (1 << 31)) != 0;
+}
+
 /// Try to get random value using RDRAND instruction (constant-time)
 /// Follows Intel DRNG Software Implementation Guide recommendations
 pub fn tryRdrand() ?u64 {
     if (!cpuHasRdrand()) return null;
+
+    // In virtualized environments, prefer safer RNG module
+    if (isVirtualized()) {
+        const rng = @import("../rng.zig");
+        const result = rng.getRandom64();
+        return if (result.success) result.value else null;
+    }
 
     var value: u64 = undefined;
     var success: u8 = undefined;
@@ -148,6 +172,13 @@ pub fn tryRdrand() ?u64 {
 /// Follows Intel DRNG Software Implementation Guide recommendations
 pub fn tryRdseed() ?u64 {
     if (!cpuHasRdseed()) return null;
+
+    // In virtualized environments, prefer safer RNG module
+    if (isVirtualized()) {
+        const rng = @import("../rng.zig");
+        const result = rng.getRandom64();
+        return if (result.success) result.value else null;
+    }
 
     var value: u64 = undefined;
     var success: u8 = undefined;

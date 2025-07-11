@@ -67,27 +67,34 @@ pub fn deriveKey(
     var hw_entropy: [32]u8 = undefined;
     var entropy_gathered: usize = 0;
 
-    // Try to get entropy from multiple sources
-    if (rng.getRandom(u256) catch null) |random_val| {
-        const bytes = @as([32]u8, @bitCast(random_val));
-        @memcpy(&hw_entropy, &bytes);
-        entropy_gathered = 32;
-    } else {
-        // Fallback: gather entropy byte by byte
-        while (entropy_gathered < 32) {
-            if (rng.getRandom(u8) catch null) |random_byte| {
-                hw_entropy[entropy_gathered] = random_byte;
-                entropy_gathered += 1;
-            } else {
-                serial.print("[KEYSTORE] WARNING: Hardware RNG failure, retrying...\r\n", .{}) catch {};
-                // Small delay before retry
-                var i: u32 = 0;
-                while (i < 1000) : (i += 1) {
-                    asm volatile ("pause");
-                }
-            }
+    // Gather entropy 8 bytes at a time using the safer getRandom64
+    while (entropy_gathered < 32) {
+        const result = rng.getRandom64();
+        if (result.success) {
+            // Copy up to 8 bytes
+            const bytes_to_copy = @min(8, 32 - entropy_gathered);
+            const value_bytes = @as([8]u8, @bitCast(result.value));
+            @memcpy(hw_entropy[entropy_gathered .. entropy_gathered + bytes_to_copy], value_bytes[0..bytes_to_copy]);
+            entropy_gathered += bytes_to_copy;
+        } else {
+            // This should not happen with our new implementation that always returns success
+            serial.print("[KEYSTORE] WARNING: RNG returned failure, using fallback entropy\r\n", .{}) catch {};
+
+            // Use fallback entropy mixing
+            var fallback_value: u64 = @intFromPtr(&hw_entropy);
+            fallback_value ^= @as(u64, @intCast(entropy_gathered)) << 32;
+            fallback_value ^= asm volatile ("rdtsc"
+                : [ret] "={rax}" (-> u64),
+            );
+
+            const fallback_bytes = @as([8]u8, @bitCast(fallback_value));
+            const bytes_to_copy = @min(8, 32 - entropy_gathered);
+            @memcpy(hw_entropy[entropy_gathered .. entropy_gathered + bytes_to_copy], fallback_bytes[0..bytes_to_copy]);
+            entropy_gathered += bytes_to_copy;
         }
     }
+
+    serial.print("[KEYSTORE] Successfully gathered 32 bytes of entropy\r\n", .{}) catch {};
 
     // Step 2: Get platform-unique data
     var platform_data: [64]u8 = undefined;

@@ -59,19 +59,25 @@ rm -f "$SERIAL_LOG" "$QEMU_LOG"
 
 # Prepare QEMU arguments
 QEMU_ARGS=(
-    -machine q35
-    -cpu max
-    -smp "$SMP_CORES"
+    -machine q35,kernel-irqchip=split,smm=on,vmport=off,hpet=off,mem-merge=off,dump-guest-core=on
+    -cpu qemu64,+ssse3,+sse4.1,+sse4.2,+popcnt,+avx,+aes,+xsave,+xsaveopt,-kvm-asyncpf,-kvmclock,+smep,+smap,+nx,check=on,enforce=on
+    -smp "$SMP_CORES",maxcpus="$SMP_CORES"
     -m "${MEMORY_MB}M"
+    -device intel-iommu,intremap=on,caching-mode=on,aw-bits=48,device-iotlb=on,dma-drain=on
+    -global ICH9-LPC.disable_s3=1
+    -global ICH9-LPC.disable_s4=1
     -no-reboot
     -no-shutdown
     -serial file:"$SERIAL_LOG"
     -monitor none
     -display none
-    -d int,cpu_reset -D "$QEMU_LOG"
+    -d int,cpu_reset,guest_errors,unimp -D "$QEMU_LOG"
     -drive file="$UEFI_IMAGE",format=raw,if=none,id=boot
     -device ahci,id=ahci
     -device ide-hd,drive=boot,bus=ahci.0,bootindex=1
+    # Hardware RNG support
+    -object rng-random,filename=/dev/urandom,id=rng0
+    -device virtio-rng-pci,rng=rng0
 )
 
 # Add OVMF firmware arguments
@@ -98,13 +104,14 @@ if [ "$DISABLE_HMAC" = "1" ] || [ ! -f "$BUILD_DIR/ziguanos.conf" ]; then
     bash "$SCRIPT_DIR/create_disk.sh" > /dev/null 2>&1
 fi
 
-# Check if KVM is available
-if [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
-    echo -e "${GREEN}KVM acceleration available${NC}"
-    QEMU_ARGS+=(-enable-kvm)
-else
-    echo -e "${YELLOW}KVM not available, using TCG (slower)${NC}"
-fi
+# Use TCG with strict settings
+echo -e "${GREEN}Using TCG emulation with strict hardware matching${NC}"
+# Add TCG-specific options for better hardware fidelity
+QEMU_ARGS+=(
+    -accel tcg,thread=multi,tb-size=512,split-wx=on
+    -rtc base=utc,driftfix=slew
+    -global kvm-pit.lost_tick_policy=delay
+)
 
 # Run QEMU
 echo -e "${GREEN}Starting QEMU with UEFI...${NC}"
