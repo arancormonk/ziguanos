@@ -119,6 +119,5 @@ fn testValidUserContext() void {
 // 9. Invalid exception vector > 255 - would panic
 
 pub fn printSecurityStats() void {
-    serial.println("\n[EXCEPTION_TEST] Security Statistics:", .{});
     interrupt_security.printStatistics();
 }

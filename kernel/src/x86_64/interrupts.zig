@@ -65,8 +65,10 @@ export fn handleInterrupt(vector: u64, error_code: u64, frame: *exceptions.Inter
 
     // Safety check: validate frame pointer
     const frame_addr = @intFromPtr(frame);
-    // Frame should be in reasonable memory range (above 1MB, below 128GB)
-    if (frame_addr < 0x100000 or frame_addr > 0x2000000000) {
+    // Frame should be in reasonable memory range
+    // Allow low memory (above 0x1000 for trampoline/early boot) and kernel memory (below 128GB)
+    // Low memory is valid during AP startup, BIOS callbacks, and early boot transitions
+    if (frame_addr < 0x1000 or frame_addr > 0x2000000000) {
         serial.print("[IRQ] ERROR: Invalid frame pointer ", .{});
         secure_print.printHex("", frame_addr);
         serial.println("", .{});

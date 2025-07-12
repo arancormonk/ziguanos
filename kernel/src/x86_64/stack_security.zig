@@ -184,7 +184,7 @@ pub fn init() !void {
     // This will be updated later when we switch to the dynamic stack
     const stack_bottom = @intFromPtr(&__boot_stack_bottom);
     const stack_top = @intFromPtr(&__boot_stack_top);
-    const stack_size: usize = 0x4000; // 16KB boot stack
+    const stack_size: usize = 0x10000; // 64KB boot stack (matches linker script)
 
     // Verify the addresses are reasonable
     if (stack_top < stack_bottom) {
@@ -660,6 +660,14 @@ pub fn checkStackDepth() void {
     );
 
     const cpu_stack = &cpu_stacks[current_cpu_id];
+
+    // Special case: Check if we're in low memory (trampoline/AP startup/interrupt context)
+    // This can happen during SMP initialization or when handling interrupts from real mode
+    if (rsp < 0x100000) {
+        // This is a valid low memory stack, don't treat as overflow
+        // Common during AP startup (trampoline at 0x8000) or BIOS/UEFI callbacks
+        return;
+    }
 
     // Calculate current depth (stack grows down)
     const current_depth = cpu_stack.top - rsp;
