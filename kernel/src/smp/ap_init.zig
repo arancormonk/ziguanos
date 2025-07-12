@@ -5,6 +5,7 @@ const std = @import("std");
 const apic = @import("../x86_64/apic.zig");
 const apic_unified = @import("../x86_64/apic_unified.zig");
 const paging = @import("../x86_64/paging.zig");
+const paging_constants = @import("../x86_64/paging/constants.zig");
 const pmm = @import("../memory/pmm.zig");
 const per_cpu = @import("per_cpu.zig");
 const cpu_local = @import("cpu_local.zig");
@@ -16,6 +17,9 @@ const timer = @import("../x86_64/timer.zig");
 const heap = @import("../memory/heap.zig");
 const runtime_info = @import("../boot/runtime_info.zig");
 const error_utils = @import("../lib/error_utils.zig");
+const cpu_init = @import("../x86_64/cpu_init.zig");
+const gdt = @import("../x86_64/gdt.zig");
+const idt = @import("../x86_64/idt.zig");
 
 // Import the trampoline symbols
 // These are defined in trampoline.S in the .data.trampoline section
@@ -89,7 +93,147 @@ const TrampolineOffsets = struct {
     const cpu_id_offset: usize = 0x858; // 2136 bytes from ap_startup_data
     // ap_stack_array starts after cpu_id (4 bytes) + alignment to 8
     const stack_array_offset: usize = 0x860; // 2144 bytes from ap_startup_data
+    // ap_kernel_gdtr starts after stack array (256 * 8 = 2048 bytes) + alignment to 16
+    // NOTE: This is beyond the current trampoline size!
+    const kernel_gdtr_offset: usize = 0x1070; // 4208 bytes from ap_startup_data
+    // ap_kernel_idtr starts after gdtr (2 + 8 = 10 bytes) + alignment to 16
+    const kernel_idtr_offset: usize = 0x1080; // 4224 bytes from ap_startup_data
 };
+
+// MSR constants for MTRRs
+pub const MTRR_DEF_TYPE = 0x2FF;
+pub const MTRR_FIX_64K_00000 = 0x250;
+pub const MTRR_FIX_16K_80000 = 0x258;
+pub const MTRR_FIX_16K_A0000 = 0x259;
+pub const MTRR_FIX_4K_C0000 = 0x268;
+pub const MTRR_FIX_4K_C8000 = 0x269;
+pub const MTRR_FIX_4K_D0000 = 0x26A;
+pub const MTRR_FIX_4K_D8000 = 0x26B;
+pub const MTRR_FIX_4K_E0000 = 0x26C;
+pub const MTRR_FIX_4K_E8000 = 0x26D;
+pub const MTRR_FIX_4K_F0000 = 0x26E;
+pub const MTRR_FIX_4K_F8000 = 0x26F;
+pub const MTRR_PHYSBASE0 = 0x200;
+pub const MTRR_PHYSMASK0 = 0x201;
+pub const MTRRCAP = 0xFE;
+
+// Memory types
+pub const MEM_TYPE_UC = 0;
+pub const MEM_TYPE_WC = 1;
+pub const MEM_TYPE_WT = 4;
+pub const MEM_TYPE_WP = 5;
+pub const MEM_TYPE_WB = 6;
+
+fn getMemoryType(phys_addr: u64) u8 {
+    const cap = cpu_init.readMSR(MTRRCAP);
+    const var_count = @as(u8, @truncate(cap & 0xFF));
+    const fixed_support = (cap & (1 << 8)) != 0;
+    const wc_support = (cap & (1 << 10)) != 0;
+    // Ignore wc_support for now
+    _ = wc_support;
+
+    const def_type_msr = cpu_init.readMSR(MTRR_DEF_TYPE);
+    const mtrr_enable = (def_type_msr & (1 << 11)) != 0;
+    const fixed_enable = (def_type_msr & (1 << 10)) != 0;
+    var effective_type: u8 = @truncate(def_type_msr & 0xFF);
+
+    if (!mtrr_enable) return effective_type;
+
+    // Check fixed MTRRs if enabled and address < 1MB
+    if (fixed_enable and fixed_support and phys_addr < 0x100000) {
+        var fixed_msr: u32 = undefined;
+        var offset: u64 = undefined;
+
+        if (phys_addr < 0x80000) {
+            fixed_msr = MTRR_FIX_64K_00000;
+            offset = phys_addr / 0x10000;
+        } else if (phys_addr < 0xC0000) {
+            fixed_msr = MTRR_FIX_16K_80000 + @as(u32, @truncate((phys_addr - 0x80000) / 0x4000));
+            offset = (phys_addr % 0x4000) / 0x800;
+        } else {
+            fixed_msr = MTRR_FIX_4K_C0000 + @as(u32, @truncate((phys_addr - 0xC0000) / 0x1000));
+            offset = (phys_addr % 0x1000) / 0x200;
+        }
+
+        const fixed_value = cpu_init.readMSR(fixed_msr);
+        const shift: u6 = @intCast(offset * 8);
+        effective_type = @as(u8, @truncate((fixed_value >> shift) & 0xFF));
+    }
+
+    // Apply variable MTRRs (they override fixed)
+    var i: u32 = 0;
+    while (i < var_count) : (i += 1) {
+        const mask = cpu_init.readMSR(MTRR_PHYSMASK0 + 2 * i);
+        if ((mask & (1 << 11)) == 0) continue; // Invalid
+
+        const base = cpu_init.readMSR(MTRR_PHYSBASE0 + 2 * i);
+        if ((phys_addr & mask & paging_constants.PHYS_ADDR_MASK) == (base & mask & paging_constants.PHYS_ADDR_MASK)) {
+            effective_type = @as(u8, @truncate(base & 0xFF));
+        }
+    }
+
+    return effective_type;
+}
+
+fn setVariableMTRR(base_addr: u64, size: u64, mem_type: u8) !void {
+    if (size != 4096) return error.InvalidSize; // Only support 4KB for now
+
+    const cap = cpu_init.readMSR(MTRRCAP);
+    const var_count: u8 = @truncate(cap & 0xFF);
+
+    // Find free slot
+    var slot: ?u32 = null;
+    var i: u32 = 0;
+    while (i < var_count) : (i += 1) {
+        const mask = cpu_init.readMSR(MTRR_PHYSMASK0 + 2 * i);
+        if ((mask & (1 << 11)) == 0) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot == null) return error.NoFreeMTRR;
+
+    // Sequence to change MTRR
+    asm volatile ("cli" ::: "memory");
+    asm volatile ("wbinvd" ::: "memory");
+    var cr0 = asm volatile ("mov %%cr0, %[cr0]"
+        : [cr0] "=r" (-> u64),
+    );
+    cr0 |= @as(u64, 1 << 30); // CD=1
+    cr0 &= ~@as(u64, 1 << 29); // NW=0
+    asm volatile ("mov %[cr0], %%cr0"
+        :
+        : [cr0] "r" (cr0),
+        : "memory"
+    );
+    asm volatile ("wbinvd" ::: "memory");
+
+    var def = cpu_init.readMSR(MTRR_DEF_TYPE);
+    def &= ~@as(u64, 1 << 11); // Disable MTRRs
+    cpu_init.writeMSR(MTRR_DEF_TYPE, def);
+
+    // Set the variable MTRR
+    const mtrr_base = (base_addr & ~@as(u64, 0xFFF)) | mem_type;
+    const mtrr_mask = 0xFFFFF000 | @as(u64, 1 << 11);
+    cpu_init.writeMSR(MTRR_PHYSBASE0 + 2 * slot.?, mtrr_base);
+    cpu_init.writeMSR(MTRR_PHYSMASK0 + 2 * slot.?, mtrr_mask);
+
+    asm volatile ("wbinvd" ::: "memory");
+    def |= @as(u64, 1 << 11); // Enable MTRRs
+    cpu_init.writeMSR(MTRR_DEF_TYPE, def);
+    asm volatile ("wbinvd" ::: "memory");
+    cr0 &= ~@as(u64, 1 << 30); // CD=0
+    cr0 &= ~@as(u64, 1 << 29); // NW=0
+    asm volatile ("mov %[cr0], %%cr0"
+        :
+        : [cr0] "r" (cr0),
+        : "memory"
+    );
+    asm volatile ("wbinvd" ::: "memory");
+    asm volatile ("sti" ::: "memory");
+
+    serial.println("[SMP] Set MTRR slot {} for 0x{x}-0x{x} to type {}", .{ slot.?, base_addr, base_addr + size - 1, mem_type });
+}
 
 /// Initialize an Application Processor
 pub fn initAP(cpu_id: u32, apic_id: u8) !void {
@@ -607,12 +751,12 @@ fn setupTrampoline() !void {
         const entry_offset = idt_offset + (i * 8);
         const entry_ptr = @as(*[8]u8, @ptrFromInt(TRAMPOLINE_ADDR + entry_offset));
         // Set offset 15:0
-        entry_ptr[0] = @truncate(exception_handler_addr & 0xFF);
-        entry_ptr[1] = @truncate((exception_handler_addr >> 8) & 0xFF);
+        entry_ptr[0] = @as(u8, @truncate(exception_handler_addr & 0xFF));
+        entry_ptr[1] = @as(u8, @truncate((exception_handler_addr >> 8) & 0xFF));
         // Selector and flags are already set
         // Set offset 31:16 (for 32-bit mode, upper 16 bits of offset)
-        entry_ptr[6] = @truncate((exception_handler_addr >> 16) & 0xFF);
-        entry_ptr[7] = @truncate((exception_handler_addr >> 24) & 0xFF);
+        entry_ptr[6] = @as(u8, @truncate((exception_handler_addr >> 16) & 0xFF));
+        entry_ptr[7] = @as(u8, @truncate((exception_handler_addr >> 24) & 0xFF));
     }
     serial.println("[SMP] Patched IDT entries to point to exception handler at 0x{x}", .{exception_handler_addr});
 
@@ -658,12 +802,12 @@ fn setupTrampoline() !void {
     const gdt_limit: u16 = 39; // 5 entries * 8 bytes - 1 = 0x27
 
     // Write the correct GDTR (limit=0x27, base=physical address of GDT)
-    gdtr_ptr[0] = @truncate(gdt_limit & 0xFF);
-    gdtr_ptr[1] = @truncate((gdt_limit >> 8) & 0xFF);
-    gdtr_ptr[2] = @truncate(gdt_physical_addr & 0xFF);
-    gdtr_ptr[3] = @truncate((gdt_physical_addr >> 8) & 0xFF);
-    gdtr_ptr[4] = @truncate((gdt_physical_addr >> 16) & 0xFF);
-    gdtr_ptr[5] = @truncate((gdt_physical_addr >> 24) & 0xFF);
+    gdtr_ptr[0] = @as(u8, @truncate(gdt_limit & 0xFF));
+    gdtr_ptr[1] = @as(u8, @truncate((gdt_limit >> 8) & 0xFF));
+    gdtr_ptr[2] = @as(u8, @truncate(gdt_physical_addr & 0xFF));
+    gdtr_ptr[3] = @as(u8, @truncate((gdt_physical_addr >> 8) & 0xFF));
+    gdtr_ptr[4] = @as(u8, @truncate((gdt_physical_addr >> 16) & 0xFF));
+    gdtr_ptr[5] = @as(u8, @truncate((gdt_physical_addr >> 24) & 0xFF));
 
     serial.println("[SMP] Fixed GDTR: limit=0x{x}, base=0x{x}", .{ gdt_limit, gdt_physical_addr });
 
@@ -676,12 +820,12 @@ fn setupTrampoline() !void {
     const idt_limit: u16 = 2047; // 256 entries * 8 bytes - 1 = 0x7FF
 
     // Write the correct IDTR (limit=0x7FF, base=physical address of IDT)
-    idtr_ptr[0] = @truncate(idt_limit & 0xFF);
-    idtr_ptr[1] = @truncate((idt_limit >> 8) & 0xFF);
-    idtr_ptr[2] = @truncate(idt_physical_addr & 0xFF);
-    idtr_ptr[3] = @truncate((idt_physical_addr >> 8) & 0xFF);
-    idtr_ptr[4] = @truncate((idt_physical_addr >> 16) & 0xFF);
-    idtr_ptr[5] = @truncate((idt_physical_addr >> 24) & 0xFF);
+    idtr_ptr[0] = @as(u8, @truncate(idt_limit & 0xFF));
+    idtr_ptr[1] = @as(u8, @truncate((idt_limit >> 8) & 0xFF));
+    idtr_ptr[2] = @as(u8, @truncate(idt_physical_addr & 0xFF));
+    idtr_ptr[3] = @as(u8, @truncate((idt_physical_addr >> 8) & 0xFF));
+    idtr_ptr[4] = @as(u8, @truncate((idt_physical_addr >> 16) & 0xFF));
+    idtr_ptr[5] = @as(u8, @truncate((idt_physical_addr >> 24) & 0xFF));
 
     serial.println("[SMP] Fixed IDTR: limit=0x{x}, base=0x{x}", .{ idt_limit, idt_physical_addr });
 
@@ -729,6 +873,14 @@ fn setupTrampoline() !void {
     serial.println("", .{});
     if (verify_ptr[0] != 0xFA) { // Should start with cli
         serial.println("[SMP] ERROR: Trampoline corrupted immediately after setup!", .{});
+    }
+
+    // Add to setupTrampoline after ensureTrampolineIdentityMapped
+    const tramp_mem_type = getMemoryType(TRAMPOLINE_ADDR);
+    serial.println("[SMP] Trampoline at 0x{x} memory type: 0x{x}", .{ TRAMPOLINE_ADDR, tramp_mem_type });
+    if (tramp_mem_type != MEM_TYPE_WB) {
+        serial.println("[SMP] Overriding trampoline memory type to WB", .{});
+        try setVariableMTRR(TRAMPOLINE_ADDR, 4096, MEM_TYPE_WB);
     }
 }
 
@@ -934,9 +1086,11 @@ fn updateTrampolineData(cpu_id: u32, stack_top: [*]u8, cpu_data: *per_cpu.CpuDat
     // Update entry point (64-bit virtual address)
     // In a PIE kernel, @intFromPtr already gives us the runtime address
     // The trampoline will jump to this address after setting up paging
-    const entry_addr = @intFromPtr(&apMainEntry);
+    // Use the wrapper function for better debugging
+    const ap_entry_wrapper = @import("ap_entry_wrapper.zig");
+    const entry_addr = @intFromPtr(&ap_entry_wrapper.apEntryWrapper);
     entry_point_ptr.* = entry_addr;
-    serial.println("[SMP] Set ap_entry_point to 0x{x}", .{entry_addr});
+    serial.println("[SMP] Set ap_entry_point to 0x{x} (wrapper)", .{entry_addr});
 
     // Update CPU ID
     cpu_id_ptr.* = cpu_id;
@@ -1015,10 +1169,98 @@ fn updateTrampolineData(cpu_id: u32, stack_top: [*]u8, cpu_data: *per_cpu.CpuDat
     startup_state.ap_stack_top = stack_top;
     startup_state.ap_cpu_data = cpu_data;
 
+    // Set up kernel GDT and IDT pointers for the AP
+    setupKernelDescriptorPointers(trampoline_base + ap_startup_data_offset);
+
     // Ensure all writes are visible with full memory barrier
     ap_sync.memoryBarrier();
 
     return ap_startup_data_offset;
+}
+
+fn setupKernelDescriptorPointers(ap_startup_data_base: u64) void {
+    _ = ap_startup_data_base; // Not used anymore
+
+    // Use fixed locations in low memory for transition GDT and kernel IDT
+    const TRANSITION_GDT_ADDR: u64 = 0x9000;
+    const TRANSITION_GDTR_ADDR: u64 = 0x9100;
+    const KERNEL_IDTR_ADDR: u64 = 0x9110;
+
+    // Get the current GDT and IDT from the BSP
+    var kernel_gdt_info: gdt.GDTPointer = undefined;
+    var kernel_idt_info: idt.IDTPointer = undefined;
+
+    // Get current GDT
+    asm volatile ("sgdt (%[ptr])"
+        :
+        : [ptr] "r" (&kernel_gdt_info),
+        : "memory"
+    );
+
+    // Get current IDT
+    asm volatile ("sidt (%[ptr])"
+        :
+        : [ptr] "r" (&kernel_idt_info),
+        : "memory"
+    );
+
+    // Create a minimal transition GDT in low memory with just the essential segments
+    // This avoids needing to access the kernel's GDT at a high virtual address
+    const gdt_entries = @as([*]volatile u64, @ptrFromInt(TRANSITION_GDT_ADDR));
+
+    // Copy the first 3 essential entries from kernel GDT
+    // 0x00: Null descriptor
+    // 0x08: Kernel code segment
+    // 0x10: Kernel data segment
+    const kernel_gdt_entries = @as([*]const u64, @ptrFromInt(kernel_gdt_info.base));
+    gdt_entries[0] = kernel_gdt_entries[0]; // Null
+    gdt_entries[1] = kernel_gdt_entries[1]; // Kernel code
+    gdt_entries[2] = kernel_gdt_entries[2]; // Kernel data
+
+    serial.println("[SMP] Kernel GDT entries: null=0x{x}, code=0x{x}, data=0x{x}", .{ gdt_entries[0], gdt_entries[1], gdt_entries[2] });
+
+    // Write transition GDTR
+    const gdtr_ptr = @as(*volatile u16, @ptrFromInt(TRANSITION_GDTR_ADDR));
+    gdtr_ptr.* = 23; // Limit for 3 entries (3*8 - 1)
+
+    // Write base address
+    const gdtr_base_bytes = @as([*]volatile u8, @ptrFromInt(TRANSITION_GDTR_ADDR + 2));
+    for (0..8) |i| {
+        gdtr_base_bytes[i] = @as(u8, @truncate(TRANSITION_GDT_ADDR >> @as(u6, @intCast(i * 8))));
+    }
+
+    serial.println("[SMP] Created transition GDT at 0x{x} with kernel segments", .{TRANSITION_GDT_ADDR});
+
+    // Write kernel IDT pointer to fixed location
+    const kernel_idtr_ptr = @as(*volatile u16, @ptrFromInt(KERNEL_IDTR_ADDR));
+    kernel_idtr_ptr.* = kernel_idt_info.limit;
+
+    // Write base address byte by byte to avoid alignment issues
+    const idt_base_bytes = @as([*]volatile u8, @ptrFromInt(KERNEL_IDTR_ADDR + 2));
+    const idt_base_value = kernel_idt_info.base;
+    for (0..8) |i| {
+        idt_base_bytes[i] = @as(u8, @truncate(idt_base_value >> @as(u6, @intCast(i * 8))));
+    }
+
+    serial.println("[SMP] Set kernel IDTR at 0x{x}: limit=0x{x}, base=0x{x}", .{ KERNEL_IDTR_ADDR, kernel_idt_info.limit, kernel_idt_info.base });
+
+    // Flush cache lines for the descriptor pointers
+    asm volatile ("clflush (%[addr])"
+        :
+        : [addr] "r" (TRANSITION_GDT_ADDR),
+        : "memory"
+    );
+    asm volatile ("clflush (%[addr])"
+        :
+        : [addr] "r" (TRANSITION_GDTR_ADDR),
+        : "memory"
+    );
+    asm volatile ("clflush (%[addr])"
+        :
+        : [addr] "r" (KERNEL_IDTR_ADDR),
+        : "memory"
+    );
+    asm volatile ("mfence" ::: "memory");
 }
 
 /// Simple busy wait for AP startup (doesn't require interrupts or TSC)

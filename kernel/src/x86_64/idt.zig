@@ -21,7 +21,7 @@ const IDTEntry = packed struct {
 };
 
 // IDT pointer for LIDT instruction
-const IDTPointer = packed struct {
+pub const IDTPointer = packed struct {
     limit: u16,
     base: u64,
 };

@@ -288,8 +288,10 @@ pub fn init(boot_info: *const uefi_boot.UEFIBootInfo) void {
     serial.println("[PAGING] Testing access to page table memory:", .{});
 
     // Test accessing the physical page table data through our current virtual mapping
-    const pml4_phys_ptr = @as(*const u64, @ptrFromInt(pml4_phys_addr));
-    const pdpt_phys_ptr = @as(*const u64, @ptrFromInt(pdpt_phys));
+    const pml4_phys_virt = runtime_info.physToVirt(pml4_phys_addr);
+    const pml4_phys_ptr = @as(*const u64, @ptrFromInt(pml4_phys_virt));
+    const pdpt_phys_virt = runtime_info.physToVirt(pdpt_phys);
+    const pdpt_phys_ptr = @as(*const u64, @ptrFromInt(pdpt_phys_virt));
 
     serial.println("  Reading PML4 at physical 0x{x:0>16}: 0x{x:0>16}", .{ pml4_phys_addr, pml4_phys_ptr.* });
 
@@ -1210,8 +1212,8 @@ pub fn unmapPage(virt_addr: u64) !void {
     // Navigate to the page table
     const pdpt_phys = pml4_table[pml4_idx] & PHYS_ADDR_MASK;
     // Intel SDM 4.2: Physical addresses must be accessible
-    // CRITICAL: This assumes pdpt_phys is identity mapped!
-    const pdpt = @as(*[512]u64, @ptrFromInt(pdpt_phys));
+    const pdpt_virt = runtime_info.physToVirt(pdpt_phys);
+    const pdpt = @as(*[512]u64, @ptrFromInt(pdpt_virt));
 
     if ((pdpt[pdpt_idx] & PAGE_PRESENT) == 0) {
         return error.PageNotMapped;
@@ -1227,7 +1229,8 @@ pub fn unmapPage(virt_addr: u64) !void {
     }
 
     const pd_phys = pdpt[pdpt_idx] & PHYS_ADDR_MASK;
-    const pd = @as(*[512]u64, @ptrFromInt(pd_phys));
+    const pd_virt = runtime_info.physToVirt(pd_phys);
+    const pd = @as(*[512]u64, @ptrFromInt(pd_virt));
 
     if ((pd[pd_idx] & PAGE_PRESENT) == 0) {
         return error.PageNotMapped;
@@ -1243,7 +1246,8 @@ pub fn unmapPage(virt_addr: u64) !void {
     }
 
     const pt_phys = pd[pd_idx] & PHYS_ADDR_MASK;
-    const pt = @as(*[512]u64, @ptrFromInt(pt_phys));
+    const pt_virt = runtime_info.physToVirt(pt_phys);
+    const pt = @as(*[512]u64, @ptrFromInt(pt_virt));
 
     if ((pt[pt_idx] & PAGE_PRESENT) == 0) {
         return error.PageNotMapped;
@@ -1261,9 +1265,11 @@ fn split1GBPage(pdpt: *[512]u64, pdpt_idx: usize) !void {
     if ((entry & PAGE_HUGE) == 0) return; // Not a huge page
 
     const gb_phys_base = entry & PHYS_ADDR_MASK;
-    const flags = entry & ~PHYS_ADDR_MASK & ~PAGE_HUGE;
+    // Preserve all flags from the original huge page for the actual page mappings
+    // Remove the huge page bit, but add it back when creating 2MB pages
+    const page_flags = entry & ~PHYS_ADDR_MASK & ~PAGE_HUGE;
 
-    // Intel SDM Vol 3A Section 11.12: Cache type changes require specific procedure
+    // Intel SDM Vol 3A Section 4.10.4: Proper TLB invalidation procedure
     // Step 1: Disable interrupts
     const old_flags = asm volatile ("pushfq; popq %[flags]; cli"
         : [flags] "=r" (-> u64),
@@ -1277,7 +1283,14 @@ fn split1GBPage(pdpt: *[512]u64, pdpt_idx: usize) !void {
     // Step 2: Flush caches before changing page attributes
     asm volatile ("wbinvd" ::: "memory");
 
-    // Allocate a new PD table
+    // Step 3: Clear PRESENT bit in PDPT entry first (critical for proper TLB invalidation)
+    pdpt[pdpt_idx] &= ~PAGE_PRESENT;
+    asm volatile ("mfence" ::: "memory");
+
+    // Step 4: Flush TLB for the entire 1GB region
+    flushTLB(); // Full TLB flush for safety with 1GB page changes
+
+    // Step 5: Allocate a new PD table
     const pd_phys = pmm.allocPagesTagged(1, .PAGE_TABLES) orelse return error.OutOfMemory;
     serial.println("[PAGING] Allocated PD at physical 0x{x}", .{pd_phys});
     const pd_virt = runtime_info.physToVirt(pd_phys);
@@ -1297,28 +1310,35 @@ fn split1GBPage(pdpt: *[512]u64, pdpt_idx: usize) !void {
     @memset(pd, 0);
     serial.println("[PAGING] PD table cleared", .{});
 
-    // Fill with 2MB pages
+    // Fill with 2MB pages, preserving all flags from the original huge page
     var i: usize = 0;
     while (i < 512) : (i += 1) {
         const mb_phys = gb_phys_base + (i * PAGE_SIZE_2M);
-        pd[i] = mb_phys | flags | PAGE_HUGE; // Keep huge bit for 2MB pages
+        pd[i] = mb_phys | page_flags | PAGE_HUGE; // Keep huge bit for 2MB pages
     }
 
-    // Update PDPT entry to point to new PD
-    const pdpt_flags = (flags & ~PAGE_HUGE);
-    pdpt[pdpt_idx] = pd_phys | pdpt_flags;
-
-    // Memory barrier to ensure page table changes are visible
+    // Step 6: Update PDPT entry to point to new PD (still without PRESENT)
+    // For non-leaf entries (pointing to page tables), only use control flags
+    // Don't include page-specific flags like NX, PAT, etc.
+    const pdpt_table_flags = (page_flags & (PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER));
+    pdpt[pdpt_idx] = pd_phys | pdpt_table_flags;
+    pdpt[pdpt_idx] &= ~PAGE_PRESENT; // Ensure PRESENT is still cleared
     asm volatile ("mfence" ::: "memory");
 
-    // Step 3: Flush TLB for the entire 1GB region
-    flushTLB(); // Full TLB flush for safety with huge page changes
+    // Step 7: Invalidate TLB again
+    flushTLB();
 
-    // Step 4: Flush caches again after page table changes
+    // Step 8: Flush caches again
     asm volatile ("wbinvd" ::: "memory");
 
-    // Additional serialization after huge page split
+    // Step 9: Set PRESENT bit
+    pdpt[pdpt_idx] |= PAGE_PRESENT;
     asm volatile ("mfence" ::: "memory");
+
+    // Step 10: Final TLB invalidation
+    flushTLB();
+
+    // Additional serialization after huge page split
     asm volatile ("cpuid" ::: "eax", "ebx", "ecx", "edx", "memory");
 
     serial.println("[PAGING] Split 1GB page at PDPT index {} into 2MB pages", .{pdpt_idx});
@@ -1350,9 +1370,13 @@ fn split2MBPageAt(pd: *[512]u64, pd_idx: usize, pd_virt_base: u64) !void {
     if ((entry & PAGE_HUGE) == 0) return; // Not a huge page
 
     const mb_phys_base = entry & PHYS_ADDR_MASK;
-    const flags = entry & ~PHYS_ADDR_MASK & ~PAGE_HUGE;
+    // Preserve all flags from the original huge page for the actual page mappings
+    // Remove the huge page bit since these will be 4KB pages
+    const page_flags = entry & ~PHYS_ADDR_MASK & ~PAGE_HUGE;
 
-    // Intel SDM Vol 3A Section 11.12: Cache type changes require specific procedure
+    serial.println("[PAGING] split2MBPageAt: original entry=0x{x}, page_flags=0x{x}", .{ entry, page_flags });
+
+    // Intel SDM Vol 3A Section 4.10.4: Proper TLB invalidation procedure
     // Step 1: Disable interrupts
     const old_flags = asm volatile ("pushfq; popq %[flags]; cli"
         : [flags] "=r" (-> u64),
@@ -1366,11 +1390,35 @@ fn split2MBPageAt(pd: *[512]u64, pd_idx: usize, pd_virt_base: u64) !void {
     // Step 2: Flush caches before changing page attributes
     asm volatile ("wbinvd" ::: "memory");
 
-    // Allocate a new PT table
+    // Step 3: Clear PRESENT bit in PD entry first (critical for proper TLB invalidation)
+    pd[pd_idx] &= ~PAGE_PRESENT;
+    asm volatile ("mfence" ::: "memory");
+
+    // Step 4: Flush TLB for the entire 2MB region
+    const mb_virt = pd_virt_base + (pd_idx * PAGE_SIZE_2M);
+    var flush_addr = mb_virt;
+    const mb_end = mb_virt + PAGE_SIZE_2M;
+    while (flush_addr < mb_end) : (flush_addr += PAGE_SIZE_4K) {
+        invalidatePage(flush_addr);
+    }
+
+    // Step 5: Allocate a new PT table
     const pt_phys = pmm.allocPagesTagged(1, .PAGE_TABLES) orelse return error.OutOfMemory;
     serial.println("[PAGING] Allocated PT at physical 0x{x}", .{pt_phys});
+
+    // Debug: Verify this page is actually free and accessible
+    if (pt_phys < 0x100000) {
+        serial.println("[PAGING] WARNING: Allocated page is in low memory (< 1MB), might be reserved!", .{});
+    }
+
     const pt_virt = runtime_info.physToVirt(pt_phys);
     serial.println("[PAGING] PT virtual address: 0x{x}", .{pt_virt});
+
+    // Verify identity mapping assumption
+    if (pt_phys != pt_virt) {
+        serial.println("[PAGING] ERROR: Physical/virtual mismatch! phys=0x{x}, virt=0x{x}", .{ pt_phys, pt_virt });
+        return error.AddressTranslationError;
+    }
 
     // Check if this physical address is within our mapped range
     const max_mapped_phys = 8 * PAGE_SIZE_1G; // We map 8GB initially
@@ -1381,39 +1429,62 @@ fn split2MBPageAt(pd: *[512]u64, pd_idx: usize, pd_virt_base: u64) !void {
 
     const pt = @as(*[512]u64, @ptrFromInt(pt_virt));
 
+    // Debug: Check if we can access the PT before clearing
+    serial.println("[PAGING] Testing PT access at virtual 0x{x}...", .{pt_virt});
+
+    // Check if this address is in a valid range
+    const gb_index = pt_virt / PAGE_SIZE_1G;
+    serial.println("[PAGING] PT is in GB {}", .{gb_index});
+
+    // Try a simple read first
+    serial.println("[PAGING] Attempting test read...", .{});
+    const test_read = @as(*volatile u64, @ptrFromInt(pt_virt)).*;
+    serial.println("[PAGING] Test read from PT succeeded: 0x{x}", .{test_read});
+
     // Clear the new table
     serial.println("[PAGING] Clearing PT table...", .{});
     @memset(pt, 0);
     serial.println("[PAGING] PT table cleared", .{});
 
-    // Fill with 4KB pages
+    // Fill with 4KB pages, preserving all flags from the original huge page
+    // The original huge page had certain flags that need to be preserved
+    const original_page_flags = entry & ~PHYS_ADDR_MASK & ~PAGE_HUGE;
+    const combined_flags = page_flags | original_page_flags;
+
     var i: usize = 0;
     while (i < 512) : (i += 1) {
         const kb_phys = mb_phys_base + (i * PAGE_SIZE_4K);
-        const pt_flags = flags;
-        pt[i] = kb_phys | pt_flags; // No huge bit for 4KB pages
+        pt[i] = kb_phys | combined_flags; // Use combined flags to preserve original permissions
     }
 
-    // Update PD entry to point to new PT
-    const pd_flags = (flags & ~PAGE_HUGE);
-    pd[pd_idx] = pt_phys | pd_flags;
-
-    // Memory barrier to ensure page table changes are visible
+    // Step 6: Update PD entry to point to new PT (still without PRESENT)
+    // For non-leaf entries (pointing to page tables), only use control flags
+    // Don't include page-specific flags like NX, PAT, etc.
+    const pd_table_flags = (page_flags & (PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER));
+    pd[pd_idx] = pt_phys | pd_table_flags;
+    pd[pd_idx] &= ~PAGE_PRESENT; // Ensure PRESENT is still cleared
     asm volatile ("mfence" ::: "memory");
 
-    // Step 3: Flush TLB for the entire 2MB region
-    const mb_virt = pd_virt_base + (pd_idx * PAGE_SIZE_2M);
-    var flush_addr = mb_virt;
-    const mb_end = mb_virt + PAGE_SIZE_2M;
+    // Step 7: Invalidate TLB again
+    flush_addr = mb_virt;
     while (flush_addr < mb_end) : (flush_addr += PAGE_SIZE_4K) {
         invalidatePage(flush_addr);
     }
 
-    // Step 4: Flush caches again after page table changes
+    // Step 8: Flush caches again
     asm volatile ("wbinvd" ::: "memory");
 
-    // Additional serialization after huge page split
+    // Step 9: Set PRESENT bit
+    pd[pd_idx] |= PAGE_PRESENT;
     asm volatile ("mfence" ::: "memory");
+
+    // Step 10: Final TLB invalidation
+    flush_addr = mb_virt;
+    while (flush_addr < mb_end) : (flush_addr += PAGE_SIZE_4K) {
+        invalidatePage(flush_addr);
+    }
+
+    // Additional serialization after huge page split
     asm volatile ("cpuid" ::: "eax", "ebx", "ecx", "edx", "memory");
 
     serial.println("[PAGING] Split 2MB page at PD index {} (virt 0x{x}) into 4KB pages", .{ pd_idx, mb_virt });
@@ -1429,6 +1500,7 @@ fn split2MBPageAt(pd: *[512]u64, pd_idx: usize, pd_virt_base: u64) !void {
     const verify_pt = @as(*[512]u64, @ptrFromInt(pt_virt));
     const first_pt_entry = verify_pt[0];
     serial.println("[PAGING] Verified PT[0] after split: 0x{x}", .{first_pt_entry});
+    serial.println("[PAGING] Original flags: 0x{x}, combined flags: 0x{x}", .{ original_page_flags, combined_flags });
 
     // Verify a specific entry for APIC if this is the APIC page
     if (mb_virt == 0xfee00000) {
@@ -1478,7 +1550,8 @@ pub fn mapPage(virt_addr: u64, phys_addr: u64, flags: u64) !void {
     }
 
     const pdpt_phys = pml4_table[pml4_idx] & PHYS_ADDR_MASK;
-    const pdpt = @as(*[512]u64, @ptrFromInt(pdpt_phys));
+    const pdpt_virt = runtime_info.physToVirt(pdpt_phys);
+    const pdpt = @as(*[512]u64, @ptrFromInt(pdpt_virt));
 
     if ((pdpt[pdpt_idx] & PAGE_PRESENT) == 0) {
         return error.PageTableNotPresent;
@@ -1491,7 +1564,8 @@ pub fn mapPage(virt_addr: u64, phys_addr: u64, flags: u64) !void {
     }
 
     const pd_phys = pdpt[pdpt_idx] & PHYS_ADDR_MASK;
-    const pd = @as(*[512]u64, @ptrFromInt(pd_phys));
+    const pd_virt = runtime_info.physToVirt(pd_phys);
+    const pd = @as(*[512]u64, @ptrFromInt(pd_virt));
 
     if ((pd[pd_idx] & PAGE_PRESENT) == 0) {
         return error.PageTableNotPresent;
@@ -1505,7 +1579,8 @@ pub fn mapPage(virt_addr: u64, phys_addr: u64, flags: u64) !void {
     }
 
     const pt_phys = pd[pd_idx] & PHYS_ADDR_MASK;
-    const pt = @as(*[512]u64, @ptrFromInt(pt_phys));
+    const pt_virt = runtime_info.physToVirt(pt_phys);
+    const pt = @as(*[512]u64, @ptrFromInt(pt_virt));
 
     // Map the page
     pt[pt_idx] = phys_addr | flags;
@@ -1540,7 +1615,8 @@ pub fn mapPageRaw(virt_addr: u64, raw_entry: u64) !void {
     }
 
     const pdpt_phys = pml4_table[pml4_idx] & PHYS_ADDR_MASK;
-    const pdpt = @as(*[512]u64, @ptrFromInt(pdpt_phys));
+    const pdpt_virt = runtime_info.physToVirt(pdpt_phys);
+    const pdpt = @as(*[512]u64, @ptrFromInt(pdpt_virt));
 
     if ((pdpt[pdpt_idx] & PAGE_PRESENT) == 0) {
         return error.PageTableNotPresent;
@@ -1553,7 +1629,8 @@ pub fn mapPageRaw(virt_addr: u64, raw_entry: u64) !void {
     }
 
     const pd_phys = pdpt[pdpt_idx] & PHYS_ADDR_MASK;
-    const pd = @as(*[512]u64, @ptrFromInt(pd_phys));
+    const pd_virt = runtime_info.physToVirt(pd_phys);
+    const pd = @as(*[512]u64, @ptrFromInt(pd_virt));
 
     if ((pd[pd_idx] & PAGE_PRESENT) == 0) {
         return error.PageTableNotPresent;
@@ -1567,7 +1644,8 @@ pub fn mapPageRaw(virt_addr: u64, raw_entry: u64) !void {
     }
 
     const pt_phys = pd[pd_idx] & PHYS_ADDR_MASK;
-    const pt = @as(*[512]u64, @ptrFromInt(pt_phys));
+    const pt_virt = runtime_info.physToVirt(pt_phys);
+    const pt = @as(*[512]u64, @ptrFromInt(pt_virt));
 
     // Map the page with raw entry
     pt[pt_idx] = raw_entry;
@@ -1624,7 +1702,8 @@ pub fn getPhysicalAddress(virt_addr: u64) !u64 {
 
         // Check if this is a 1GB page (in PDPT) or 2MB page (in PD)
         const pdpt_phys = pml4_table[pml4_idx] & PHYS_ADDR_MASK;
-        const pdpt = @as(*[512]u64, @ptrFromInt(pdpt_phys));
+        const pdpt_virt = runtime_info.physToVirt(pdpt_phys);
+        const pdpt = @as(*[512]u64, @ptrFromInt(pdpt_virt));
 
         if ((pdpt[pdpt_idx] & PAGE_HUGE) != 0) {
             // 1GB page
@@ -1658,7 +1737,8 @@ pub fn getPageTableEntry(virt_addr: u64) !u64 {
     }
 
     const pdpt_phys = pml4_table[pml4_idx] & PHYS_ADDR_MASK;
-    const pdpt = @as(*[512]u64, @ptrFromInt(pdpt_phys));
+    const pdpt_virt = runtime_info.physToVirt(pdpt_phys);
+    const pdpt = @as(*[512]u64, @ptrFromInt(pdpt_virt));
 
     if ((pdpt[pdpt_idx] & PAGE_PRESENT) == 0) {
         return error.PageNotMapped;
@@ -1670,7 +1750,8 @@ pub fn getPageTableEntry(virt_addr: u64) !u64 {
     }
 
     const pd_phys = pdpt[pdpt_idx] & PHYS_ADDR_MASK;
-    const pd = @as(*[512]u64, @ptrFromInt(pd_phys));
+    const pd_virt = runtime_info.physToVirt(pd_phys);
+    const pd = @as(*[512]u64, @ptrFromInt(pd_virt));
 
     if ((pd[pd_idx] & PAGE_PRESENT) == 0) {
         return error.PageNotMapped;
@@ -1682,7 +1763,8 @@ pub fn getPageTableEntry(virt_addr: u64) !u64 {
     }
 
     const pt_phys = pd[pd_idx] & PHYS_ADDR_MASK;
-    const pt = @as(*[512]u64, @ptrFromInt(pt_phys));
+    const pt_virt = runtime_info.physToVirt(pt_phys);
+    const pt = @as(*[512]u64, @ptrFromInt(pt_virt));
 
     // Return 4K page entry (even if not present, for shadow stack pages)
     return pt[pt_idx];
@@ -1717,7 +1799,8 @@ pub fn makeRegionExecutable(start_addr: u64, size: u64) !void {
         }
 
         const pdpt_phys = pml4_table[pml4_idx] & PHYS_ADDR_MASK;
-        const pdpt = @as(*[512]u64, @ptrFromInt(pdpt_phys));
+        const pdpt_virt = runtime_info.physToVirt(pdpt_phys);
+        const pdpt = @as(*[512]u64, @ptrFromInt(pdpt_virt));
 
         if ((pdpt[pdpt_idx] & PAGE_PRESENT) == 0) {
             serial.println("[PAGING] PDPT entry not present for 0x{x}", .{current_addr});
@@ -1731,7 +1814,8 @@ pub fn makeRegionExecutable(start_addr: u64, size: u64) !void {
         }
 
         const pd_phys = pdpt[pdpt_idx] & PHYS_ADDR_MASK;
-        const pd = @as(*[512]u64, @ptrFromInt(pd_phys));
+        const pd_virt = runtime_info.physToVirt(pd_phys);
+        const pd = @as(*[512]u64, @ptrFromInt(pd_virt));
 
         if ((pd[pd_idx] & PAGE_PRESENT) == 0) {
             serial.println("[PAGING] PD entry not present for 0x{x}", .{current_addr});
@@ -1760,7 +1844,8 @@ pub fn makeRegionExecutable(start_addr: u64, size: u64) !void {
 
         // It's a 4KB page table
         const pt_phys = pd[pd_idx] & PHYS_ADDR_MASK;
-        const pt = @as(*[512]u64, @ptrFromInt(pt_phys));
+        const pt_virt = runtime_info.physToVirt(pt_phys);
+        const pt = @as(*[512]u64, @ptrFromInt(pt_virt));
 
         // Clear NX bit on the specific 4KB page
         if ((pt[pt_idx] & PAGE_PRESENT) != 0) {
@@ -1813,7 +1898,8 @@ pub fn split2MBPage(mb_addr: u64) !void {
     }
 
     const pdpt_phys = pml4_table[pml4_idx] & PHYS_ADDR_MASK;
-    const pdpt = @as(*[512]u64, @ptrFromInt(pdpt_phys));
+    const pdpt_virt = runtime_info.physToVirt(pdpt_phys);
+    const pdpt = @as(*[512]u64, @ptrFromInt(pdpt_virt));
 
     if ((pdpt[pdpt_idx] & PAGE_PRESENT) == 0) {
         return error.PageNotMapped;
@@ -1824,7 +1910,8 @@ pub fn split2MBPage(mb_addr: u64) !void {
     }
 
     const pd_phys = pdpt[pdpt_idx] & PHYS_ADDR_MASK;
-    const pd = @as(*[512]u64, @ptrFromInt(pd_phys));
+    const pd_virt = runtime_info.physToVirt(pd_phys);
+    const pd = @as(*[512]u64, @ptrFromInt(pd_virt));
 
     const pd_entry = pd[pd_idx];
     if ((pd_entry & PAGE_PRESENT) == 0) {
@@ -1841,7 +1928,8 @@ pub fn split2MBPage(mb_addr: u64) !void {
     const pt_page = pmm.allocPage() orelse {
         return error.OutOfMemory;
     };
-    const pt = @as(*[512]u64, @ptrFromInt(pt_page));
+    const pt_virt = runtime_info.physToVirt(pt_page);
+    const pt = @as(*[512]u64, @ptrFromInt(pt_virt));
 
     // Zero the page table
     @memset(@as([*]u8, @ptrCast(pt))[0..PAGE_SIZE_4K], 0);
@@ -1941,7 +2029,8 @@ pub fn updatePageFlags(virt_addr: u64, new_flags: u64) !void {
     }
 
     const pdpt_phys = pml4_table[pml4_idx] & PHYS_ADDR_MASK;
-    const pdpt = @as(*[512]u64, @ptrFromInt(pdpt_phys));
+    const pdpt_virt = runtime_info.physToVirt(pdpt_phys);
+    const pdpt = @as(*[512]u64, @ptrFromInt(pdpt_virt));
 
     if ((pdpt[pdpt_idx] & PAGE_PRESENT) == 0) {
         return error.PageNotMapped;
@@ -1957,7 +2046,8 @@ pub fn updatePageFlags(virt_addr: u64, new_flags: u64) !void {
     }
 
     const pd_phys = pdpt[pdpt_idx] & PHYS_ADDR_MASK;
-    const pd = @as(*[512]u64, @ptrFromInt(pd_phys));
+    const pd_virt = runtime_info.physToVirt(pd_phys);
+    const pd = @as(*[512]u64, @ptrFromInt(pd_virt));
 
     if ((pd[pd_idx] & PAGE_PRESENT) == 0) {
         return error.PageNotMapped;
@@ -1973,7 +2063,8 @@ pub fn updatePageFlags(virt_addr: u64, new_flags: u64) !void {
     }
 
     const pt_phys = pd[pd_idx] & PHYS_ADDR_MASK;
-    const pt = @as(*[512]u64, @ptrFromInt(pt_phys));
+    const pt_virt = runtime_info.physToVirt(pt_phys);
+    const pt = @as(*[512]u64, @ptrFromInt(pt_virt));
 
     if ((pt[pt_idx] & PAGE_PRESENT) == 0) {
         return error.PageNotMapped;

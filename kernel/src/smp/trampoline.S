@@ -144,7 +144,7 @@ ap_pm_entry:
 
     # Intel SDM: Step 2 - Load page table base into CR3
     # The BSP will write the PML4 address to ap_pml4_addr
-    mov (ap_pml4_addr - ap_trampoline_start + 0x8000), %eax
+    movl (ap_pml4_addr - ap_trampoline_start + 0x8000), %eax
     mov %eax, %cr3
 
     # Debug marker after CR3 loaded
@@ -209,21 +209,13 @@ ap_lm_entry:
     # Debug: Mark before delay
     movl $0xDE1A1111, 0x534
 
-    # Additional synchronization delay before accessing kernel resources
-    # This gives BSP time to complete SIPI and release locks
-    mov $0x200000, %rcx
-2:  pause
-    dec %rcx
-    jnz 2b
-
-    # Debug: Mark after delay
-    movl $0xDE1A2222, 0x538
+    # Removed delay loop to test if it's causing the hang
 
     # Memory barrier to ensure all previous operations are visible
     mfence
 
-    # Debug: Mark after mfence
-    movl $0xDE1A3333, 0x53C
+    # Debug: Mark after delay
+    movl $0xDE1A2222, 0x538
 
     # Get CPU ID from startup data
     movl (ap_cpu_id - ap_trampoline_start + 0x8000), %edi  # Load CPU ID from data section
@@ -262,8 +254,55 @@ ap_lm_entry:
     # Clear base pointer
     xor %rbp, %rbp
 
+    # Debug: Mark before loading kernel GDT
+    movl $0xBBBB, 0x590
+
+    # Load transition GDT from fixed location
+    # The BSP has created a minimal GDT at 0x9100 with copies of kernel segments
+    lgdt 0x9100
+
+    # Debug: Mark after lgdt
+    movl $0xCCCC, 0x594
+
+    # Use a temporary stack in low memory for the far jump
+    # We'll switch to the real stack after we're in the kernel segments
+    movq %rsp, %r15         # Save real RSP
+    movq $0x7000, %rsp      # Use temporary stack at 0x7000
+
+    # Perform far jump to reload CS with kernel code segment
+    pushq $0x08         # Kernel code segment
+    lea 1f(%rip), %rax
+    pushq %rax
+
+    # Debug: Mark before lretq
+    movl $0xDDDD, 0x5A0
+
+    lretq
+1:
+    # Debug: Mark after successful lretq
+    movl $0xEEEE, 0x5A4
+
+    # Now we're running with kernel code segment, reload data segments
+    mov $0x10, %ax      # Kernel data segment
+    mov %ax, %ds
+    mov %ax, %es
+    mov %ax, %fs
+    mov %ax, %gs
+    mov %ax, %ss
+
+    # Restore the real stack pointer now that segments are loaded
+    movq %r15, %rsp
+
+    # Load kernel IDT from fixed location
+    # The BSP has written the kernel IDTR to 0x9110
+    lidt 0x9110
+
     # Debug: Mark before loading entry point
     movl $0x9999, 0x560
+
+    # Before jumping to the kernel, write a marker to show we made it this far
+    movl $0xCAFEBABE, 0x5B0
+    movl %edi, 0x5B4        # Write CPU ID
 
     # Jump to kernel's AP entry point with CPU ID in RDI
     # The address is relocated and stored by BSP
@@ -279,23 +318,26 @@ ap_lm_entry:
     test %rax, %rax
     jz entry_error
 
-    # Debug: Mark that we're about to halt
+    # Debug: Mark that we're about to jump
     movl $0xDEAD0017, 0x574
 
-    # Remove the halt and try jumping to kernel
     # Write a marker to show we're about to jump
     movl $0x4A4D5021, 0x580  # "JMP!"
 
     # Ensure interrupts are disabled before jump
     cli
-    
+
+    # Clear direction flag as per ABI
+    cld
+
     # Test if we can read from the target address
     # Try to read the first byte of the target code
     movb (%rax), %bl
     movb %bl, 0x584       # Store what we read
-    
+
     # If we got here, the address is readable
     movl $0x52454144, 0x588  # "READ"
+    jmp halt
 
     # Jump to kernel entry point
     jmp *%rax
@@ -367,7 +409,7 @@ ap_idtr:
 # Variables populated by BSP
 .align 8
 ap_pml4_addr:
-    .long 0                    # Physical address of PML4
+    .quad 0                    # Physical address of PML4 (changed to quad for 64-bit support)
 
 .align 8
 ap_entry_point:

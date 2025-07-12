@@ -136,6 +136,7 @@ fn kernelMainPhase2() noreturn {
     serial.println("[KERNEL] Boot validation complete", .{});
     serial.printAddress("[KERNEL] Kernel at", boot_info.kernel_base);
     secure_print.printSize("[KERNEL] Kernel size", boot_info.kernel_size);
+    serial.println("", .{});
     serial.flush();
 
     // Basic memory info
@@ -186,10 +187,57 @@ fn kernelMainPhase2() noreturn {
     // Print final statistics
     hardware_init.printStatistics();
 
-    serial.println("[KERNEL] Kernel complete - halting", .{});
+    serial.println("[KERNEL] Kernel complete - entering main loop", .{});
+
+    // Import AP debug module
+    const ap_debug = @import("smp/ap_debug.zig");
+    const timer = @import("x86_64/timer.zig");
+
+    // Check AP status periodically
+    var last_check_time: u64 = 0;
+    var check_count: u32 = 0;
 
     // Main kernel loop
     while (true) {
+        // Check AP status every second
+        const current_time = timer.getUptime();
+        if (current_time > last_check_time + 1_000_000_000) { // 1 second in nanoseconds
+            last_check_time = current_time;
+            check_count += 1;
+
+            // Get AP summary
+            const summary = ap_debug.getApSummary();
+
+            serial.println("[KERNEL] AP Status Check #{} (uptime: {} ms):", .{ check_count, current_time / 1_000_000 });
+            serial.println("  Not started: {}", .{summary.not_started});
+            serial.println("  In trampoline: {}", .{summary.in_trampoline});
+            serial.println("  Initializing: {}", .{summary.initializing});
+            serial.println("  Ready: {}", .{summary.ready});
+            serial.println("  Running: {}", .{summary.running});
+            serial.println("  Failed: {}", .{summary.failed});
+            serial.println("  Total errors: {}", .{summary.total_errors});
+
+            // Check individual AP status for more detail
+            if (summary.in_trampoline > 0 or summary.failed > 0) {
+                serial.println("  Detailed AP status:", .{});
+                var cpu_id: u32 = 1;
+                while (cpu_id < 8) : (cpu_id += 1) { // Check first 8 CPUs
+                    if (ap_debug.getApStatus(cpu_id)) |status| {
+                        if (status.stage != .NotStarted) {
+                            serial.println("    CPU {}: stage={s}, error=0x{x}, flags=0x{x}", .{
+                                cpu_id,
+                                @tagName(status.stage),
+                                status.error_code,
+                                status.flags,
+                            });
+                        }
+                    }
+                }
+            }
+
+            serial.flush();
+        }
+
         asm volatile ("hlt");
     }
 }

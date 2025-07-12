@@ -15,7 +15,7 @@ const GDTEntry = packed struct {
 };
 
 // GDT pointer for LGDT instruction
-const GDTPointer = packed struct {
+pub const GDTPointer = packed struct {
     limit: u16,
     base: u64,
 };

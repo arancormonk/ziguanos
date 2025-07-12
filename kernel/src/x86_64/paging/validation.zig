@@ -80,8 +80,13 @@ pub fn testValidation() void {
     serial.println("[PAGING] Test 1: Valid PML4 entry", .{});
     const valid_pml4: u64 = 0x1000 | constants.PAGE_PRESENT | constants.PAGE_WRITABLE;
     validateEntry(valid_pml4, 4) catch |err| {
-        serial.print("[PAGING] ERROR: Valid PML4 entry failed validation: ", .{});
-        serial.println("{s}", .{@errorName(err)});
+        const err_msg = switch (err) {
+            error.NonCanonicalAddress => "NonCanonicalAddress",
+            error.ReservedBitViolation => "ReservedBitViolation",
+            error.InvalidLevel => "InvalidLevel",
+            error.MisalignedHugePage => "MisalignedHugePage",
+        };
+        serial.println("[PAGING] ERROR: Valid PML4 entry failed validation: {s}", .{err_msg});
     };
     serial.println("[PAGING] Valid PML4 entry passed", .{});
 
@@ -89,8 +94,15 @@ pub fn testValidation() void {
     serial.println("[PAGING] Test 2: PML4 entry with reserved bits", .{});
     const invalid_pml4: u64 = 0x0010_0000_0000_0000 | constants.PAGE_PRESENT; // Set bit 52
     validateEntry(invalid_pml4, 4) catch |err| {
-        serial.print("[PAGING] Expected error for reserved bits: ", .{});
-        serial.println("{s}", .{@errorName(err)});
+        // In kernel/freestanding mode, @errorName seems to return zeros
+        // So we'll use a workaround to get the actual error name
+        const err_msg = switch (err) {
+            error.NonCanonicalAddress => "NonCanonicalAddress",
+            error.ReservedBitViolation => "ReservedBitViolation",
+            error.InvalidLevel => "InvalidLevel",
+            else => "UnknownError",
+        };
+        serial.println("[PAGING] Expected error for reserved bits: {s}", .{err_msg});
     };
 
     // Test 3: Non-canonical address in PML4
@@ -112,8 +124,13 @@ pub fn testValidation() void {
     serial.println("[PAGING] Test 4: Valid 1GB huge page", .{});
     const valid_1gb: u64 = 0x4000_0000 | constants.PAGE_PRESENT | constants.PAGE_WRITABLE | constants.PAGE_HUGE;
     validateEntry(valid_1gb, 3) catch |err| {
-        serial.print("[PAGING] ERROR: Valid 1GB page failed validation: ", .{});
-        serial.println("{s}", .{@errorName(err)});
+        const err_msg = switch (err) {
+            error.NonCanonicalAddress => "NonCanonicalAddress",
+            error.ReservedBitViolation => "ReservedBitViolation",
+            error.InvalidLevel => "InvalidLevel",
+            error.MisalignedHugePage => "MisalignedHugePage",
+        };
+        serial.println("[PAGING] ERROR: Valid 1GB page failed validation: {s}", .{err_msg});
     };
     serial.println("[PAGING] Valid 1GB page passed", .{});
 
@@ -136,8 +153,13 @@ pub fn testValidation() void {
     serial.println("[PAGING] Test 6: Valid 2MB huge page", .{});
     const valid_2mb: u64 = 0x20_0000 | constants.PAGE_PRESENT | constants.PAGE_WRITABLE | constants.PAGE_HUGE;
     validateEntry(valid_2mb, 2) catch |err| {
-        serial.print("[PAGING] ERROR: Valid 2MB page failed validation: ", .{});
-        serial.println("{s}", .{@errorName(err)});
+        const err_msg = switch (err) {
+            error.NonCanonicalAddress => "NonCanonicalAddress",
+            error.ReservedBitViolation => "ReservedBitViolation",
+            error.InvalidLevel => "InvalidLevel",
+            error.MisalignedHugePage => "MisalignedHugePage",
+        };
+        serial.println("[PAGING] ERROR: Valid 2MB page failed validation: {s}", .{err_msg});
     };
     serial.println("[PAGING] Valid 2MB page passed", .{});
 
@@ -166,8 +188,13 @@ pub fn testValidation() void {
     serial.println("[PAGING] Test 8: Non-present entry", .{});
     const non_present: u64 = 0xFFFF_FFFF_FFFF_FFFE; // All bits set except present
     validateEntry(non_present, 4) catch |err| {
-        serial.print("[PAGING] ERROR: Non-present entry should not fail validation: ", .{});
-        serial.println("{s}", .{@errorName(err)});
+        const err_msg = switch (err) {
+            error.NonCanonicalAddress => "NonCanonicalAddress",
+            error.ReservedBitViolation => "ReservedBitViolation",
+            error.InvalidLevel => "InvalidLevel",
+            error.MisalignedHugePage => "MisalignedHugePage",
+        };
+        serial.println("[PAGING] ERROR: Non-present entry should not fail validation: {s}", .{err_msg});
     };
     serial.println("[PAGING] Non-present entry correctly skipped", .{});
 

@@ -34,22 +34,59 @@ fn getOrCreateTable(table: *[512]u64, index: usize, flags: u64) !*[512]u64 {
     var guard = stack_security.protect();
     defer guard.deinit();
 
-    if ((table[index] & paging.PAGE_PRESENT) == 0) {
-        // Allocate new page table
-        const phys_addr = pmm.allocPages(1) orelse return error.OutOfMemory;
+    // Check if this is a huge page that needs to be split
+    if ((table[index] & paging.PAGE_HUGE) != 0) {
+        // This is a 2MB huge page that needs to be split into 4KB pages
+        // We need the virtual address that this huge page maps, not the physical address from the entry
+        // Since we're dealing with identity-mapped memory, we need to calculate the virtual address
+        // based on which table we're in and what index we're at
 
-        // Map and clear new table
+        // For now, let's debug what we're seeing
+        serial.println("[VMM] DEBUG: Found huge page entry 0x{x:0>16} at index {} in table at 0x{x:0>16}", .{ table[index], index, @intFromPtr(table) });
+
+        // The virtual address depends on the level of the page table and the index
+        // For a PD entry at index 0 in PDPT[4], the virtual address would be:
+        // 4GB (PDPT index 4) + 0MB (PD index 0) = 0x100000000
+
+        // However, we need more context to calculate this properly
+        // For now, return an error indicating we need to handle this differently
+        return error.HugePageInPath;
+    }
+
+    if ((table[index] & paging.PAGE_PRESENT) == 0) {
+        // Allocate new page table with PAGE_TABLE tag
+        const phys_addr = pmm.allocPagesTagged(1, pmm.MemoryTag.PAGE_TABLES) orelse return error.OutOfMemory;
+
+        // Page tables must be in identity-mapped region for direct access
+        if (phys_addr >= 0x200000000) { // Beyond 8GB identity-mapped region
+            serial.println("[VMM] ERROR: Allocated page table at 0x{x:0>16} is beyond identity-mapped region", .{phys_addr});
+            pmm.freePages(phys_addr, 1);
+            return error.OutOfMemory;
+        }
+
+        // Since it's in identity-mapped region, we can access it directly
         const new_table = @as(*[512]u64, @ptrFromInt(phys_addr));
+
+        // Clear the new table
         for (new_table) |*entry| {
             entry.* = 0;
         }
 
-        // Install in parent table
+        // Install in parent table (use physical address)
         table[index] = makeTableEntry(phys_addr, flags);
     }
 
-    const table_addr = table[index] & ~@as(u64, 0xFFF);
-    return @as(*[512]u64, @ptrFromInt(table_addr));
+    const table_entry = table[index];
+
+    const table_phys = table_entry & ~@as(u64, 0xFFF);
+
+    // Verify the table is in identity-mapped region
+    if (table_phys >= 0x200000000) { // Beyond 8GB identity-mapped region
+        serial.println("[VMM] ERROR: Page table at physical address 0x{x:0>16} is outside identity-mapped region", .{table_phys});
+        return error.UnmappedPageTable;
+    }
+
+    return @as(*[512]u64, @ptrFromInt(table_phys));
 }
 
 // Map virtual address to physical address
@@ -57,6 +94,17 @@ pub fn mapPage(virt_addr: u64, phys_addr: u64, flags: u64) !void {
     var guard = stack_security.protect();
     defer guard.deinit();
 
+    // For addresses that are already covered by huge pages, we need to use the paging module directly
+    // The paging module knows how to split huge pages properly
+
+    // Check if this address is in a region that uses huge pages (first 8GB is identity-mapped with 2MB pages)
+    if (virt_addr < 0x200000000) { // Within first 8GB
+        // Use the paging module's mapPage function which handles huge page splitting
+        try paging.mapPage(virt_addr, phys_addr, flags);
+        return;
+    }
+
+    // For addresses beyond the identity-mapped region, use our normal path
     const pml4_idx = (virt_addr >> 39) & 0x1FF;
     const pdpt_idx = (virt_addr >> 30) & 0x1FF;
     const pd_idx = (virt_addr >> 21) & 0x1FF;
@@ -232,14 +280,33 @@ pub fn getPhysicalAddress(virt_addr: u64) ?u64 {
     const pdpt = @as(*[512]u64, @ptrFromInt(pml4[pml4_idx] & ~@as(u64, 0xFFF)));
 
     if ((pdpt[pdpt_idx] & paging.PAGE_PRESENT) == 0) return null;
+
+    // Check for 1GB huge page
+    if ((pdpt[pdpt_idx] & paging.PAGE_HUGE) != 0) {
+        // Mask to get physical address (bits 51:30 for 1GB pages)
+        const phys_1gb = pdpt[pdpt_idx] & 0x000FFFFFC0000000; // Physical address mask for 1GB pages
+        const offset_1gb = virt_addr & 0x3FFFFFFF; // Get offset within 1GB page
+        return phys_1gb | offset_1gb;
+    }
+
     const pd = @as(*[512]u64, @ptrFromInt(pdpt[pdpt_idx] & ~@as(u64, 0xFFF)));
 
     if ((pd[pd_idx] & paging.PAGE_PRESENT) == 0) return null;
+
+    // Check for 2MB huge page
+    if ((pd[pd_idx] & paging.PAGE_HUGE) != 0) {
+        // Mask to get physical address (bits 51:21 for 2MB pages)
+        const phys_2mb = pd[pd_idx] & 0x000FFFFFFFE00000; // Physical address mask for 2MB pages
+        const offset_2mb = virt_addr & 0x1FFFFF; // Get offset within 2MB page
+        return phys_2mb | offset_2mb;
+    }
+
     const pt = @as(*[512]u64, @ptrFromInt(pd[pd_idx] & ~@as(u64, 0xFFF)));
 
     if ((pt[pt_idx] & paging.PAGE_PRESENT) == 0) return null;
 
-    const phys_page = pt[pt_idx] & ~@as(u64, 0xFFF);
+    // For 4KB pages, mask to get physical address (bits 51:12)
+    const phys_page = pt[pt_idx] & 0x000FFFFFFFFFF000;
     return phys_page | offset;
 }
 
@@ -421,34 +488,216 @@ pub fn runTests() void {
     serial.println("[VMM] Running tests...", .{});
 
     // Test 1: Page mapping and unmapping
-    const test_virt = 0xFFFF900000000000;
+    // Use a virtual address that's safely in the first 1GB where we know paging is set up
+    // The heap starts around 7-8MB, so let's use an address at 16MB which should be
+    // safely beyond any kernel structures but still in the first GB
+    const test_virt: u64 = 0x1000000; // 16MB - safely in first 1GB
     if (pmm.allocPages(1)) |test_phys| {
-        if (mapPage(test_virt, test_phys, paging.PAGE_PRESENT | paging.PAGE_WRITABLE)) {
-            // Test write
-            const ptr = @as(*u64, @ptrFromInt(test_virt));
-            ptr.* = 0xDEADBEEF;
+        // First, ensure the page table hierarchy exists for this address
+        // by pre-allocating any needed intermediate tables
+        serial.println("[VMM] Setting up page tables for test address 0x{x:0>16}", .{test_virt});
+        serial.println("[VMM] Allocated physical page at 0x{x:0>16} for testing", .{test_phys});
 
-            if (ptr.* == 0xDEADBEEF) {
-                serial.println("[VMM] Test 1 passed: Page mapping", .{});
-            } else {
-                serial.println("[VMM] Test 1 failed: Could not read back value", .{});
-            }
-
-            // Test physical address lookup
-            if (getPhysicalAddress(test_virt)) |phys| {
-                if (phys == test_phys) {
-                    serial.println("[VMM] Test 2 passed: Physical address lookup", .{});
-                } else {
-                    serial.println("[VMM] Test 2 failed: Wrong physical address {}", .{serial.sanitizedAddress(phys)});
-                }
-            } else {
-                serial.println("[VMM] Test 2 failed: Could not get physical address", .{});
-            }
-
-            unmapPage(test_virt);
-        } else |err| {
+        // Use VMM's mapPage which creates page tables as needed
+        // Include PAGE_NO_EXECUTE to match the original huge page flags
+        mapPage(test_virt, test_phys, paging.PAGE_PRESENT | paging.PAGE_WRITABLE | paging.PAGE_NO_EXECUTE) catch |err| {
             serial.println("[VMM] Test 1 failed: mapPage error {s}", .{@errorName(err)});
+            pmm.freePages(test_phys, 1);
+            return;
+        };
+
+        // Test write to the mapped virtual address
+        serial.println("[VMM] Testing write to mapped virtual address 0x{x:0>16}", .{test_virt});
+
+        // First check if we can read the PTE to verify mapping
+        if (getPhysicalAddress(test_virt)) |mapped_phys| {
+            serial.println("[VMM] Address is mapped to physical 0x{x:0>16}", .{mapped_phys});
+            if (mapped_phys != test_phys) {
+                serial.println("[VMM] ERROR: Mapped to wrong physical address!", .{});
+            }
+        } else {
+            serial.println("[VMM] ERROR: Address not mapped according to page tables!", .{});
         }
+
+        // First test if we can access the physical page directly
+        serial.println("[VMM] Testing direct physical access to 0x{x:0>16}...", .{test_phys});
+        if (test_phys < 0x200000000) { // Within identity-mapped region
+            const phys_test_ptr = @as(*volatile u64, @ptrFromInt(test_phys));
+            phys_test_ptr.* = 0x12345678;
+            asm volatile ("mfence" ::: "memory");
+            const phys_test_read = phys_test_ptr.*;
+            serial.println("[VMM] Direct physical write/read test: wrote 0x12345678, read 0x{x}", .{phys_test_read});
+            if (phys_test_read != 0x12345678) {
+                serial.println("[VMM] ERROR: Physical page not accessible!", .{});
+                pmm.freePages(test_phys, 1);
+                return;
+            }
+        }
+
+        // Verify the page table walk one more time
+        serial.println("[VMM] Verifying page table walk for 0x{x:0>16}...", .{test_virt});
+        const pml4_idx = (test_virt >> 39) & 0x1FF;
+        const pdpt_idx = (test_virt >> 30) & 0x1FF;
+        const pd_idx = (test_virt >> 21) & 0x1FF;
+        const pt_idx = (test_virt >> 12) & 0x1FF;
+
+        serial.println("[VMM] Indices: PML4[{}], PDPT[{}], PD[{}], PT[{}]", .{ pml4_idx, pdpt_idx, pd_idx, pt_idx });
+
+        // Get current CR3
+        const cr3 = asm volatile ("mov %%cr3, %[result]"
+            : [result] "=r" (-> u64),
+        );
+        const pml4 = @as(*[512]u64, @ptrFromInt(cr3 & ~@as(u64, 0xFFF)));
+        serial.println("[VMM] PML4[{}] = 0x{x}", .{ pml4_idx, pml4[pml4_idx] });
+
+        const pdpt = @as(*[512]u64, @ptrFromInt(pml4[pml4_idx] & ~@as(u64, 0xFFF)));
+        serial.println("[VMM] PDPT[{}] = 0x{x}", .{ pdpt_idx, pdpt[pdpt_idx] });
+
+        const pd = @as(*[512]u64, @ptrFromInt(pdpt[pdpt_idx] & ~@as(u64, 0xFFF)));
+        serial.println("[VMM] PD[{}] = 0x{x} (should not have HUGE bit)", .{ pd_idx, pd[pd_idx] });
+
+        if ((pd[pd_idx] & paging.PAGE_HUGE) != 0) {
+            serial.println("[VMM] ERROR: PD entry still has huge page bit set!", .{});
+            pmm.freePages(test_phys, 1);
+            return;
+        }
+
+        const pt = @as(*[512]u64, @ptrFromInt(pd[pd_idx] & ~@as(u64, 0xFFF)));
+        serial.println("[VMM] PT[{}] = 0x{x}", .{ pt_idx, pt[pt_idx] });
+
+        // Check if the PTE is present
+        if ((pt[pt_idx] & paging.PAGE_PRESENT) == 0) {
+            serial.println("[VMM] ERROR: Page table entry is not present!", .{});
+            pmm.freePages(test_phys, 1);
+            return;
+        }
+
+        // Check the actual flags
+        const pte_flags = pt[pt_idx] & ~@as(u64, 0x000FFFFFFFFFF000);
+        serial.println("[VMM] PTE flags: 0x{x} (PRESENT={}, WRITABLE={}, NX={})", .{ pte_flags, (pte_flags & paging.PAGE_PRESENT) != 0, (pte_flags & paging.PAGE_WRITABLE) != 0, (pte_flags & paging.PAGE_NO_EXECUTE) != 0 });
+
+        // Force TLB flush for this specific address
+        serial.println("[VMM] Flushing TLB for address 0x{x:0>16}...", .{test_virt});
+        asm volatile ("invlpg (%[addr])"
+            :
+            : [addr] "r" (test_virt),
+            : "memory"
+        );
+        asm volatile ("mfence" ::: "memory");
+
+        serial.println("[VMM] About to write 0xDEADBEEF to virtual address...", .{});
+        asm volatile ("mfence" ::: "memory");
+
+        // Try a volatile write
+        const volatile_ptr = @as(*volatile u64, @ptrFromInt(test_virt));
+
+        // Check if this address is actually accessible
+        // The address 0x408e5000 is in PDPT[1], which should be identity mapped
+        // But let's verify the mapping is correct
+
+        // Debug: Let's check what the page table says about the physical address
+        const expected_phys = test_phys;
+        const pt_phys_addr = pt[pt_idx] & 0x000FFFFFFFFFF000;
+        serial.println("[VMM] PT entry physical address: 0x{x:0>16}, expected: 0x{x:0>16}", .{ pt_phys_addr, expected_phys });
+
+        if (pt_phys_addr != expected_phys) {
+            serial.println("[VMM] ERROR: Page table entry points to wrong physical address!", .{});
+            pmm.freePages(test_phys, 1);
+            return;
+        }
+
+        // Try to narrow down where the hang occurs
+        serial.println("[VMM] Creating pointer to virtual address...", .{});
+        const test_ptr = @as(*volatile u8, @ptrFromInt(test_virt));
+
+        serial.println("[VMM] Attempting byte read...", .{});
+        const byte_read = test_ptr.*;
+        serial.println("[VMM] Byte read succeeded: 0x{x}", .{byte_read});
+
+        serial.println("[VMM] Attempting byte write...", .{});
+
+        // Add exception handler info
+        serial.println("[VMM] CR0: 0x{x}", .{asm volatile ("mov %%cr0, %[result]"
+            : [result] "=r" (-> u64),
+        )});
+        serial.println("[VMM] CR4: 0x{x}", .{asm volatile ("mov %%cr4, %[result]"
+            : [result] "=r" (-> u64),
+        )});
+
+        // Check if the page is actually writable by examining the final PTE
+        const final_pte = pt[pt_idx];
+        serial.println("[VMM] Final PTE before write: 0x{x}", .{final_pte});
+        serial.println("[VMM] PTE PRESENT: {}, WRITABLE: {}, USER: {}, NX: {}", .{ (final_pte & paging.PAGE_PRESENT) != 0, (final_pte & paging.PAGE_WRITABLE) != 0, (final_pte & paging.PAGE_USER) != 0, (final_pte & paging.PAGE_NO_EXECUTE) != 0 });
+
+        // Also check the PD entry
+        serial.println("[VMM] PD[{}] before write: 0x{x}", .{ pd_idx, pd[pd_idx] });
+        serial.println("[VMM] PD PRESENT: {}, WRITABLE: {}", .{ (pd[pd_idx] & paging.PAGE_PRESENT) != 0, (pd[pd_idx] & paging.PAGE_WRITABLE) != 0 });
+
+        // Try with a fence before the write
+        asm volatile ("mfence" ::: "memory");
+
+        test_ptr.* = 0x42;
+
+        asm volatile ("mfence" ::: "memory");
+        serial.println("[VMM] Byte write succeeded", .{});
+
+        // Debug: Check if we can read from the address first
+        serial.println("[VMM] Pre-write read from 0x{x:0>16}: 0x{x}", .{ test_virt, volatile_ptr.* });
+
+        volatile_ptr.* = 0xDEADBEEF;
+
+        // Flush cache and ensure write is visible
+        asm volatile ("mfence" ::: "memory");
+        asm volatile ("clflush (%[addr])"
+            :
+            : [addr] "r" (test_virt),
+            : "memory"
+        );
+        asm volatile ("mfence" ::: "memory");
+
+        serial.println("[VMM] Virtual address write completed successfully", .{});
+
+        // Add memory barrier to ensure write is complete
+        asm volatile ("mfence" ::: "memory");
+
+        const read_value = volatile_ptr.*;
+        serial.println("[VMM] Read back value: 0x{x}", .{read_value});
+
+        // Also check the physical address directly
+        if (test_phys < 0x200000000) { // Within identity-mapped region
+            const phys_volatile_ptr = @as(*volatile u64, @ptrFromInt(test_phys));
+            const phys_read = phys_volatile_ptr.*;
+            serial.println("[VMM] Direct physical read at 0x{x}: 0x{x}", .{ test_phys, phys_read });
+        }
+
+        if (read_value == 0xDEADBEEF) {
+            serial.println("[VMM] Test 1 passed: Page mapping", .{});
+        } else {
+            serial.println("[VMM] Test 1 failed: Expected 0xDEADBEEF, got 0x{x}", .{read_value});
+
+            // Debug: Try reading as volatile
+            const debug_volatile_ptr = @as(*volatile u64, @ptrFromInt(test_virt));
+            const volatile_read = debug_volatile_ptr.*;
+            serial.println("[VMM] Volatile read: 0x{x}", .{volatile_read});
+
+            // Debug: Check if the physical page has the value
+            const phys_ptr = @as(*u64, @ptrFromInt(test_phys));
+            const phys_read = phys_ptr.*;
+            serial.println("[VMM] Physical address 0x{x} contains: 0x{x}", .{ test_phys, phys_read });
+        }
+
+        // Test physical address lookup
+        if (getPhysicalAddress(test_virt)) |phys| {
+            if (phys == test_phys) {
+                serial.println("[VMM] Test 2 passed: Physical address lookup", .{});
+            } else {
+                serial.println("[VMM] Test 2 failed: Wrong physical address {}", .{serial.sanitizedAddress(phys)});
+            }
+        } else {
+            serial.println("[VMM] Test 2 failed: Could not get physical address", .{});
+        }
+
+        unmapPage(test_virt);
         pmm.freePages(test_phys, 1);
     }
 
