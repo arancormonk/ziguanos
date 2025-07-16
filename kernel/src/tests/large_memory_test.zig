@@ -75,11 +75,11 @@ pub fn testLargeMemorySupport() void {
         serial.println("  Allocation returned address: 0x{x:0>16}", .{addr});
 
         // Check if this is beyond the bootstrap bitmap range
-        const bootstrap_max = 8 * 1024 * 1024 * 1024; // 8GB
+        const bootstrap_max = 4 * 1024 * 1024 * 1024; // 4GB
         if (addr >= bootstrap_max) {
-            serial.println("  ✓ System is using extended bitmap (address beyond 8GB limit)", .{});
+            serial.println("  ✓ System is using extended bitmap (address beyond 4GB bootstrap limit)", .{});
         } else {
-            serial.println("  System is within bootstrap bitmap range (< 8GB)", .{});
+            serial.println("  System is within bootstrap bitmap range (< 4GB)", .{});
         }
     }
 

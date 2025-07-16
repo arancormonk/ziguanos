@@ -26,12 +26,11 @@ const memory_regions = @import("pmm/memory_regions.zig");
 const PAGE_SIZE: u64 = 0x1000; // 4KB pages
 const PAGES_PER_BITMAP: u64 = 64; // One u64 bitmap entry tracks 64 pages
 
-// Dynamic bitmap sizing - support up to x86-64 architectural limits
+// Dynamic bitmap sizing - support up to CPU's physical address limits
 // We use a two-phase approach:
 // 1. Bootstrap phase: Use static bitmap for initial allocation (supports up to 4GB)
 // 2. Full phase: Dynamically allocate larger bitmap based on actual memory
 const BOOTSTRAP_BITMAP_SIZE: usize = 16384; // 16K u64s = 128KB bitmap = 4GB RAM
-const MAX_SUPPORTED_MEMORY: u64 = 16 * 1024 * 1024 * 1024 * 1024; // 16TB
 
 // Memory regions
 const PMM_RESERVED_BASE: u64 = 0x100000; // Reserve first 1MB
@@ -987,8 +986,9 @@ pub fn printReservedRegions() void {
     reserved_regions.getTracker().printDetailedList();
 }
 
-// Upgrade to a larger bitmap for systems with more than 8GB RAM
+// Upgrade to a larger bitmap for systems with more than 4GB RAM
 // This should be called after boot services exit when we have more memory available
+// Supports up to the CPU's physical address limit (typically 40-52 bits)
 pub fn upgradeBitmapForLargeMemory(boot_info: *const uefi_boot.UEFIBootInfo) !void {
     // Get CPU capabilities to determine maximum supported memory
     const cpuid = @import("../x86_64/cpuid.zig");
@@ -996,10 +996,14 @@ pub fn upgradeBitmapForLargeMemory(boot_info: *const uefi_boot.UEFIBootInfo) !vo
     const phys_bits = cpuid.getPhysicalAddressBits();
 
     serial.print("[PMM] Upgrading bitmap for large memory support\n", .{});
-    serial.print("[PMM] CPU supports {} physical address bits ({} TB max)\n", .{
-        phys_bits,
-        max_phys_mem / (1024 * 1024 * 1024 * 1024),
-    });
+    serial.print("[PMM] CPU supports {} physical address bits (", .{phys_bits});
+
+    // Print human-readable size
+    if (max_phys_mem >= 1024 * 1024 * 1024 * 1024 * 1024) { // >= 1PB
+        serial.print("{} PB max)\n", .{max_phys_mem / (1024 * 1024 * 1024 * 1024 * 1024)});
+    } else {
+        serial.print("{} TB max)\n", .{max_phys_mem / (1024 * 1024 * 1024 * 1024)});
+    }
 
     // Recalculate actual memory regions
     const region_info = memory_regions.init(boot_info) catch |err| {

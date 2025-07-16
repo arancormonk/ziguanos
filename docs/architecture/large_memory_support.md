@@ -35,7 +35,7 @@ The PMM now uses a two-phase approach for bitmap allocation:
 - Allocated after boot services exit
 - Sized based on actual system memory
 - Extends tracking capability without discovering new memory
-- Supports up to 16TB RAM (can be extended)
+- Supports up to CPU's physical address limit (40-52 bits, 1TB-4PB)
 
 ### 3. Physical Address Masking
 
@@ -80,13 +80,20 @@ A comprehensive test (`large_memory_test.zig`) verifies:
 - Allocation patterns with large blocks
 - Support for high memory addresses
 
-## Limitations
+## Scalability
 
-Current implementation supports up to 16TB RAM. To extend further:
+The implementation dynamically scales based on CPU capabilities:
 
-1. Increase bitmap allocation size in `upgradeBitmapForLargeMemory()`
-2. Consider multi-level bitmap for extremely large systems (>16TB)
-3. May need to optimize bitmap operations for performance
+- **Consumer CPUs** (40-bit): Up to 1TB RAM
+- **Server CPUs** (46-bit): Up to 64TB RAM  
+- **Future CPUs** (52-bit): Up to 4PB RAM
+
+The bitmap size scales linearly with memory:
+- 1TB RAM requires 32MB bitmap
+- 64TB RAM requires 2GB bitmap
+- 4PB RAM requires 128GB bitmap
+
+As long as there's enough free memory for the bitmap after boot services exit, the system can track any amount of RAM up to the CPU's physical address limit.
 
 ## Security Considerations
 
