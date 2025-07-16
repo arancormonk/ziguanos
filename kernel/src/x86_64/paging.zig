@@ -1265,9 +1265,11 @@ fn split1GBPage(pdpt: *[512]u64, pdpt_idx: usize) !void {
     if ((entry & PAGE_HUGE) == 0) return; // Not a huge page
 
     const gb_phys_base = entry & PHYS_ADDR_MASK;
-    // Preserve all flags from the original huge page for the actual page mappings
-    // Remove the huge page bit, but add it back when creating 2MB pages
-    const page_flags = entry & ~PHYS_ADDR_MASK & ~PAGE_HUGE;
+    // Preserve only essential permission flags from the original huge page
+    // We should NOT preserve transient flags like ACCESSED or DIRTY
+    const ESSENTIAL_FLAGS = PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER | PAGE_NO_EXECUTE |
+        PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH;
+    const essential_page_flags = entry & ESSENTIAL_FLAGS & ~PAGE_HUGE;
 
     // Intel SDM Vol 3A Section 4.10.4: Proper TLB invalidation procedure
     // Step 1: Disable interrupts
@@ -1310,17 +1312,17 @@ fn split1GBPage(pdpt: *[512]u64, pdpt_idx: usize) !void {
     @memset(pd, 0);
     serial.println("[PAGING] PD table cleared", .{});
 
-    // Fill with 2MB pages, preserving all flags from the original huge page
+    // Fill with 2MB pages, preserving only essential flags from the original huge page
     var i: usize = 0;
     while (i < 512) : (i += 1) {
         const mb_phys = gb_phys_base + (i * PAGE_SIZE_2M);
-        pd[i] = mb_phys | page_flags | PAGE_HUGE; // Keep huge bit for 2MB pages
+        pd[i] = mb_phys | essential_page_flags | PAGE_HUGE; // Keep huge bit for 2MB pages
     }
 
     // Step 6: Update PDPT entry to point to new PD (still without PRESENT)
     // For non-leaf entries (pointing to page tables), only use control flags
     // Don't include page-specific flags like NX, PAT, etc.
-    const pdpt_table_flags = (page_flags & (PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER));
+    const pdpt_table_flags = essential_page_flags & (PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
     pdpt[pdpt_idx] = pd_phys | pdpt_table_flags;
     pdpt[pdpt_idx] &= ~PAGE_PRESENT; // Ensure PRESENT is still cleared
     asm volatile ("mfence" ::: "memory");
@@ -1370,11 +1372,7 @@ fn split2MBPageAt(pd: *[512]u64, pd_idx: usize, pd_virt_base: u64) !void {
     if ((entry & PAGE_HUGE) == 0) return; // Not a huge page
 
     const mb_phys_base = entry & PHYS_ADDR_MASK;
-    // Preserve all flags from the original huge page for the actual page mappings
-    // Remove the huge page bit since these will be 4KB pages
-    const page_flags = entry & ~PHYS_ADDR_MASK & ~PAGE_HUGE;
-
-    serial.println("[PAGING] split2MBPageAt: original entry=0x{x}, page_flags=0x{x}", .{ entry, page_flags });
+    serial.println("[PAGING] split2MBPageAt: original entry=0x{x}", .{entry});
 
     // Intel SDM Vol 3A Section 4.10.4: Proper TLB invalidation procedure
     // Step 1: Disable interrupts
@@ -1446,21 +1444,23 @@ fn split2MBPageAt(pd: *[512]u64, pd_idx: usize, pd_virt_base: u64) !void {
     @memset(pt, 0);
     serial.println("[PAGING] PT table cleared", .{});
 
-    // Fill with 4KB pages, preserving all flags from the original huge page
-    // The original huge page had certain flags that need to be preserved
-    const original_page_flags = entry & ~PHYS_ADDR_MASK & ~PAGE_HUGE;
-    const combined_flags = page_flags | original_page_flags;
+    // Fill with 4KB pages, preserving only essential permission flags from the original huge page
+    // We should NOT preserve transient flags like ACCESSED or DIRTY
+    const ESSENTIAL_FLAGS = PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER | PAGE_NO_EXECUTE |
+        PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH;
+    const essential_page_flags = entry & ESSENTIAL_FLAGS;
 
     var i: usize = 0;
     while (i < 512) : (i += 1) {
         const kb_phys = mb_phys_base + (i * PAGE_SIZE_4K);
-        pt[i] = kb_phys | combined_flags; // Use combined flags to preserve original permissions
+        // Only use essential flags, not transient ones like ACCESSED/DIRTY
+        pt[i] = kb_phys | essential_page_flags;
     }
 
     // Step 6: Update PD entry to point to new PT (still without PRESENT)
     // For non-leaf entries (pointing to page tables), only use control flags
     // Don't include page-specific flags like NX, PAT, etc.
-    const pd_table_flags = (page_flags & (PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER));
+    const pd_table_flags = essential_page_flags & (PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
     pd[pd_idx] = pt_phys | pd_table_flags;
     pd[pd_idx] &= ~PAGE_PRESENT; // Ensure PRESENT is still cleared
     asm volatile ("mfence" ::: "memory");
@@ -1500,7 +1500,7 @@ fn split2MBPageAt(pd: *[512]u64, pd_idx: usize, pd_virt_base: u64) !void {
     const verify_pt = @as(*[512]u64, @ptrFromInt(pt_virt));
     const first_pt_entry = verify_pt[0];
     serial.println("[PAGING] Verified PT[0] after split: 0x{x}", .{first_pt_entry});
-    serial.println("[PAGING] Original flags: 0x{x}, combined flags: 0x{x}", .{ original_page_flags, combined_flags });
+    serial.println("[PAGING] Essential flags preserved: 0x{x}", .{essential_page_flags});
 
     // Verify a specific entry for APIC if this is the APIC page
     if (mb_virt == 0xfee00000) {

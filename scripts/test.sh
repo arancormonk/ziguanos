@@ -71,7 +71,8 @@ QEMU_ARGS=(
     -serial file:"$SERIAL_LOG"
     -monitor none
     -display none
-    -d int,cpu_reset,guest_errors,unimp -D "$QEMU_LOG"
+    -d cpu_reset,guest_errors,unimp
+    -D "$QEMU_LOG"
     -drive file="$UEFI_IMAGE",format=raw,if=none,id=boot
     -device ahci,id=ahci
     -device ide-hd,drive=boot,bus=ahci.0,bootindex=1

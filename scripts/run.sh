@@ -120,7 +120,7 @@ QEMU_ARGS+=(
     -rtc base=utc,driftfix=slew
     -global kvm-pit.lost_tick_policy=delay
     # Enable guest error reporting
-    -d guest_errors,unimp
+    -d cpu_reset,guest_errors,unimp
     -D "$QEMU_LOG"
 )
 
