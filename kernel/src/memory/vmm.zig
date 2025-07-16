@@ -58,8 +58,9 @@ fn getOrCreateTable(table: *[512]u64, index: usize, flags: u64) !*[512]u64 {
         const phys_addr = pmm.allocPagesTagged(1, pmm.MemoryTag.PAGE_TABLES) orelse return error.OutOfMemory;
 
         // Page tables must be in identity-mapped region for direct access
-        if (phys_addr >= 0x200000000) { // Beyond 8GB identity-mapped region
-            serial.println("[VMM] ERROR: Allocated page table at 0x{x:0>16} is beyond identity-mapped region", .{phys_addr});
+        const max_mapped = paging.getHighestMappedPhysicalAddress();
+        if (phys_addr >= max_mapped) {
+            serial.println("[VMM] ERROR: Allocated page table at 0x{x:0>16} is beyond identity-mapped region (max: 0x{x:0>16})", .{ phys_addr, max_mapped });
             pmm.freePages(phys_addr, 1);
             return error.OutOfMemory;
         }
@@ -81,8 +82,9 @@ fn getOrCreateTable(table: *[512]u64, index: usize, flags: u64) !*[512]u64 {
     const table_phys = table_entry & ~@as(u64, 0xFFF);
 
     // Verify the table is in identity-mapped region
-    if (table_phys >= 0x200000000) { // Beyond 8GB identity-mapped region
-        serial.println("[VMM] ERROR: Page table at physical address 0x{x:0>16} is outside identity-mapped region", .{table_phys});
+    const max_mapped = paging.getHighestMappedPhysicalAddress();
+    if (table_phys >= max_mapped) {
+        serial.println("[VMM] ERROR: Page table at physical address 0x{x:0>16} is outside identity-mapped region (max: 0x{x:0>16})", .{ table_phys, max_mapped });
         return error.UnmappedPageTable;
     }
 
@@ -97,8 +99,9 @@ pub fn mapPage(virt_addr: u64, phys_addr: u64, flags: u64) !void {
     // For addresses that are already covered by huge pages, we need to use the paging module directly
     // The paging module knows how to split huge pages properly
 
-    // Check if this address is in a region that uses huge pages (first 8GB is identity-mapped with 2MB pages)
-    if (virt_addr < 0x200000000) { // Within first 8GB
+    // Check if this address is in a region that uses huge pages
+    const max_mapped = paging.getHighestMappedPhysicalAddress();
+    if (virt_addr < max_mapped) { // Within identity-mapped region
         // Use the paging module's mapPage function which handles huge page splitting
         try paging.mapPage(virt_addr, phys_addr, flags);
         return;
@@ -209,8 +212,9 @@ fn getOrCreateTableBootstrap(table: *[512]u64, index: usize, flags: u64) !*[512]
         const phys_addr = pmm.allocPagesTagged(1, pmm.MemoryTag.PAGE_TABLES) orelse return error.OutOfMemory;
 
         // Check if physical address is in mapped region
-        if (phys_addr >= 0x200000000) { // 8GB limit
-            serial.println("[VMM] ERROR: Physical address 0x{x:0>16} is beyond identity-mapped region!", .{phys_addr});
+        const max_mapped = paging.getHighestMappedPhysicalAddress();
+        if (phys_addr >= max_mapped) {
+            serial.println("[VMM] ERROR: Physical address 0x{x:0>16} is beyond identity-mapped region (max: 0x{x:0>16})!", .{ phys_addr, max_mapped });
             return error.OutOfMemory;
         }
 
@@ -521,7 +525,8 @@ pub fn runTests() void {
 
         // First test if we can access the physical page directly
         serial.println("[VMM] Testing direct physical access to 0x{x:0>16}...", .{test_phys});
-        if (test_phys < 0x200000000) { // Within identity-mapped region
+        const max_mapped = paging.getHighestMappedPhysicalAddress();
+        if (test_phys < max_mapped) { // Within identity-mapped region
             const phys_test_ptr = @as(*volatile u64, @ptrFromInt(test_phys));
             phys_test_ptr.* = 0x12345678;
             asm volatile ("mfence" ::: "memory");
@@ -664,7 +669,8 @@ pub fn runTests() void {
         serial.println("[VMM] Read back value: 0x{x}", .{read_value});
 
         // Also check the physical address directly
-        if (test_phys < 0x200000000) { // Within identity-mapped region
+        const max_mapped2 = paging.getHighestMappedPhysicalAddress();
+        if (test_phys < max_mapped2) { // Within identity-mapped region
             const phys_volatile_ptr = @as(*volatile u64, @ptrFromInt(test_phys));
             const phys_read = phys_volatile_ptr.*;
             serial.println("[VMM] Direct physical read at 0x{x}: 0x{x}", .{ test_phys, phys_read });

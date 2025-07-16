@@ -53,8 +53,6 @@ pub fn initPhase1(boot_info: *const UEFIBootInfo) !struct { phys: u64, top: u64 
 
 /// Initialize memory subsystems phase 2 - after stack switch
 pub fn initPhase2(kernel_stack_phys: u64, new_stack_top: u64, boot_info: *const UEFIBootInfo) !void {
-    _ = boot_info; // Currently unused but kept for future expansion
-
     serial.println("[KERNEL] Successfully switched to new kernel stack", .{});
     serial.flush();
 
@@ -62,6 +60,14 @@ pub fn initPhase2(kernel_stack_phys: u64, new_stack_top: u64, boot_info: *const 
     stack_security.updateStackInfo(kernel_stack_phys, new_stack_top);
     stack_security.checkStackDepth();
     serial.flush(); // Ensure stack security update is visible
+
+    // Phase 2: Extend memory mapping now that PMM is available
+    serial.println("[KERNEL] Extending memory mapping (Phase 2)...", .{});
+    paging.extendMemoryMapping(boot_info) catch |err| {
+        serial.println("[KERNEL] WARNING: Failed to extend memory mapping: {s}", .{@errorName(err)});
+        serial.println("[KERNEL] System will continue with limited memory mapping", .{});
+    };
+    serial.flush();
 
     // Initialize virtual memory manager
     vmm.init() catch |err| {

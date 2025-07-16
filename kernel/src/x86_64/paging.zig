@@ -70,7 +70,15 @@ const PAGE_PAT_LARGE = pat.PAGE_PAT_LARGE;
 // Page table structures (must be page-aligned and in writable section)
 pub var pml4_table: [512]u64 align(4096) = [_]u64{0} ** 512;
 pub var pdpt_table: [512]u64 align(4096) = [_]u64{0} ** 512;
-pub var pd_tables: [16][512]u64 align(4096) = [_][512]u64{[_]u64{0} ** 512} ** 16; // Support up to 16GB
+
+// Phase 1: Minimal static page tables for early boot
+// 4GB is sufficient for kernel, KASLR range, and early boot structures
+// Each PD table maps 1GB, so 4 tables = 4GB
+pub var pd_tables: [4][512]u64 align(4096) = [_][512]u64{[_]u64{0} ** 512} ** 4;
+
+// Phase 2: Track dynamically allocated page tables after PMM is ready
+var dynamic_pd_tables: ?[]*[512]u64 = null;
+var dynamic_pd_count: usize = 0;
 // Additional page table for fine-grained kernel mapping
 var kernel_pd: [512]u64 align(4096) = [_]u64{0} ** 512;
 var kernel_pts: [16][512]u64 align(4096) = [_][512]u64{[_]u64{0} ** 512} ** 16; // 16 PT tables = 32MB coverage
@@ -98,6 +106,9 @@ var initial_cr3: u64 = 0;
 
 // Global page table lock system for synchronization
 var page_table_locks: spinlock.PageTableLockSystem = spinlock.PageTableLockSystem{};
+
+// Global variable to track the highest mapped physical address
+var highest_mapped_physical_addr: u64 = 0;
 
 // Check if stack protection is safe in current context
 // Stack protection is unsafe during:
@@ -357,6 +368,57 @@ pub fn init(boot_info: *const uefi_boot.UEFIBootInfo) void {
     serial.println("[PAGING] Page table setup complete - stack protection can now be safely enabled", .{});
 }
 
+/// Find the highest physical memory address from UEFI memory map
+fn findHighestPhysicalAddress(boot_info: *const uefi_boot.UEFIBootInfo) u64 {
+    var highest_addr: u64 = 0;
+    var highest_usable_addr: u64 = 0;
+
+    if (boot_info.memory_map_addr == 0 or boot_info.memory_map_descriptor_size == 0) {
+        // Default to 8GB if we can't read the memory map
+        return 8 * PAGE_SIZE_1G;
+    }
+
+    const memory_map = @as([*]const u8, @ptrFromInt(boot_info.memory_map_addr));
+    const descriptor_count = boot_info.memory_map_size / boot_info.memory_map_descriptor_size;
+
+    var offset: usize = 0;
+    for (0..descriptor_count) |_| {
+        const descriptor = @as(*const uefi_boot.UEFIMemoryDescriptor, @ptrCast(@alignCast(&memory_map[offset])));
+
+        // Track highest address overall
+        const end_addr = descriptor.physical_start + (descriptor.number_of_pages * PAGE_SIZE_4K);
+        if (end_addr > highest_addr) {
+            highest_addr = end_addr;
+        }
+
+        // Only consider usable memory types for mapping
+        switch (descriptor.type) {
+            .Conventional, .BootServicesCode, .BootServicesData, .LoaderCode, .LoaderData => {
+                if (end_addr > highest_usable_addr) {
+                    highest_usable_addr = end_addr;
+                }
+            },
+            else => {}, // Skip non-RAM regions
+        }
+
+        offset += boot_info.memory_map_descriptor_size;
+    }
+
+    // Use the highest usable address, not just any address
+    const effective_highest = highest_usable_addr;
+
+    // Round up to next GB boundary for cleaner mapping
+    const highest_gb = @divFloor(effective_highest + PAGE_SIZE_1G - 1, PAGE_SIZE_1G);
+
+    serial.println("[PAGING] Highest usable RAM address: 0x{x:0>16} ({} GB)", .{ highest_usable_addr, @divFloor(highest_usable_addr, PAGE_SIZE_1G) });
+
+    if (highest_addr > highest_usable_addr) {
+        serial.println("[PAGING] Note: Highest address overall: 0x{x:0>16} (includes MMIO/reserved)", .{highest_addr});
+    }
+
+    return highest_gb * PAGE_SIZE_1G;
+}
+
 fn setupIdentityMapping(boot_info: *const uefi_boot.UEFIBootInfo) usize {
     // Only use stack protection if it's safe to do so
     var guard: ?stack_security.canaryGuard() = null;
@@ -406,10 +468,14 @@ fn setupIdentityMapping(boot_info: *const uefi_boot.UEFIBootInfo) usize {
     const safe_kernel_end = kernel_end + SAFETY_MARGIN;
     const safe_kernel_end_gb = @divFloor(safe_kernel_end + PAGE_SIZE_1G - 1, PAGE_SIZE_1G);
 
-    // 4. We should map at least what UEFI has given us access to
-    // For safety, map at least 8GB or more if kernel is loaded higher
-    const min_gbs = 8; // Reasonable minimum for modern systems
-    const gbs_to_map = @max(min_gbs, @max(safe_kernel_end_gb, page_tables_gb + 1));
+    // 4. Determine how much physical memory we actually have
+    const highest_phys_addr = findHighestPhysicalAddress(boot_info);
+    const highest_phys_gb = @divFloor(highest_phys_addr, PAGE_SIZE_1G);
+
+    // Map all physical memory, but ensure we cover at least the kernel
+    // Phase 1: Map minimum required for early boot (4GB or where kernel ends)
+    const min_gbs = @max(4, safe_kernel_end_gb); // At least 4GB or where kernel ends
+    const gbs_to_map = @max(min_gbs, @max(highest_phys_gb, page_tables_gb + 1));
 
     serial.print("[PAGING] Mapping ", .{});
     serial.print("0x{x:0>16}", .{gbs_to_map});
@@ -568,11 +634,16 @@ fn setupIdentityMapping(boot_info: *const uefi_boot.UEFIBootInfo) usize {
     applyMemoryPermissions(boot_info);
 
     // Return the actual number of GBs we mapped (may be less than requested due to limits)
-    if (features.gbpages) {
-        return @min(gbs_to_map, pdpt_table.len);
-    } else {
-        return @min(gbs_to_map, pd_tables.len);
-    }
+    const mapped_gbs = if (features.gbpages)
+        @min(gbs_to_map, pdpt_table.len)
+    else
+        @min(gbs_to_map, pd_tables.len);
+
+    // Store the highest mapped physical address globally
+    highest_mapped_physical_addr = mapped_gbs * PAGE_SIZE_1G;
+    serial.println("[PAGING] Highest mapped physical address: 0x{x:0>16} ({} GB)", .{ highest_mapped_physical_addr, mapped_gbs });
+
+    return mapped_gbs;
 }
 
 fn isKernelAddress(addr: u64) bool {
@@ -1157,6 +1228,120 @@ pub const loadPageTableWithPCID = pcid.loadPageTableWithPCID;
 pub const switchPageTableNoFlush = pcid.switchPageTableNoFlush;
 pub const invalidatePCID = pcid.invalidatePCID;
 pub const isPCIDSupported = pcid.isSupported;
+
+/// Get the highest mapped physical address
+pub fn getHighestMappedPhysicalAddress() u64 {
+    return highest_mapped_physical_addr;
+}
+
+/// Phase 2: Extend memory mapping after PMM is initialized
+/// This function dynamically allocates page tables to map all available physical memory
+pub fn extendMemoryMapping(boot_info: *const uefi_boot.UEFIBootInfo) !void {
+    serial.println("[PAGING] Phase 2: Extending memory mapping with dynamic page tables", .{});
+
+    // Determine how much memory we need to map
+    const highest_phys_addr = findHighestPhysicalAddress(boot_info);
+    const total_gbs_needed = @divFloor(highest_phys_addr, PAGE_SIZE_1G);
+
+    // We already mapped some GBs in phase 1
+    const already_mapped_gbs = @divFloor(highest_mapped_physical_addr, PAGE_SIZE_1G);
+
+    if (total_gbs_needed <= already_mapped_gbs) {
+        serial.println("[PAGING] All physical memory already mapped in phase 1", .{});
+        return;
+    }
+
+    const additional_gbs = total_gbs_needed - already_mapped_gbs;
+    serial.println("[PAGING] Need to map {} additional GB (from GB {} to {})", .{ additional_gbs, already_mapped_gbs, total_gbs_needed - 1 });
+
+    // Check if we need more than 512GB (would require multiple PDPT tables)
+    if (total_gbs_needed > 512) {
+        serial.println("[PAGING] WARNING: System has {} GB but current implementation supports up to 512 GB", .{total_gbs_needed});
+        serial.println("[PAGING] Capping at 512 GB. Full multi-TB support requires multiple PDPT allocation", .{});
+    }
+
+    // Cap at 512GB for now (single PDPT limit)
+    const effective_total_gbs = @min(total_gbs_needed, 512);
+    const effective_additional_gbs = if (effective_total_gbs > already_mapped_gbs)
+        effective_total_gbs - already_mapped_gbs
+    else
+        0;
+
+    if (effective_additional_gbs == 0) {
+        serial.println("[PAGING] Already at mapping limit", .{});
+        return;
+    }
+
+    // Allocate page tables for the additional memory
+    const pd_tables_needed = effective_additional_gbs;
+    const pages_needed = pd_tables_needed; // Each PD table is one 4KB page
+
+    serial.println("[PAGING] Need to allocate {} pages for extended page tables", .{pages_needed});
+
+    // Check if the allocation is reasonable
+    if (pages_needed > 1000) {
+        serial.println("[PAGING] ERROR: Excessive page table allocation request ({} pages = {} MB)", .{ pages_needed, (pages_needed * 4) / 1024 });
+        serial.println("[PAGING] This would likely cause memory corruption. Aborting extension.", .{});
+        return;
+    }
+
+    // Allocate memory for the new page tables
+    const pd_tables_phys = pmm.allocPagesTagged(pages_needed, pmm.MemoryTag.PAGE_TABLES) orelse {
+        serial.println("[PAGING] ERROR: Failed to allocate {} pages for extended page tables", .{pages_needed});
+        return error.OutOfMemory;
+    };
+
+    serial.println("[PAGING] Allocated {} pages at 0x{x:0>16} for extended page tables", .{ pages_needed, pd_tables_phys });
+
+    // Sanity check: make sure the allocation is in mapped memory
+    if (pd_tables_phys >= highest_mapped_physical_addr) {
+        serial.println("[PAGING] ERROR: Page tables allocated beyond mapped memory!", .{});
+        pmm.freePages(pd_tables_phys, pages_needed);
+        return error.OutOfMemory;
+    }
+
+    // Map the new page tables and extend the mappings
+    var current_phys = pd_tables_phys;
+
+    for (already_mapped_gbs..effective_total_gbs) |gb_idx| {
+        // Should not happen now that we cap at 512GB
+        if (gb_idx >= pdpt_table.len) {
+            serial.println("[PAGING] ERROR: Unexpected PDPT overflow at {} GB", .{gb_idx});
+            break;
+        }
+
+        // Map the PD table page itself so we can write to it
+        const pd_table_ptr = @as(*[512]u64, @ptrFromInt(current_phys));
+
+        // Clear the new PD table
+        @memset(pd_table_ptr, 0);
+
+        // Set up the PDPT entry
+        pdpt_table[gb_idx] = current_phys | PAGE_PRESENT | PAGE_WRITABLE;
+
+        // Fill the PD table with 2MB pages
+        const gb_start_addr = gb_idx * PAGE_SIZE_1G;
+        for (0..512) |j| {
+            const phys_addr = gb_start_addr + (j * PAGE_SIZE_2M);
+            pd_table_ptr[j] = phys_addr | PAGE_PRESENT | PAGE_WRITABLE | PAGE_HUGE | PAGE_NO_EXECUTE;
+        }
+
+        // Log progress every 64GB instead of every GB to reduce spam
+        if (gb_idx % 64 == 0 or gb_idx == effective_total_gbs - 1) {
+            serial.println("[PAGING] Mapped up to GB {} (0x{x:0>16})", .{ gb_idx, gb_start_addr + PAGE_SIZE_1G - 1 });
+        }
+
+        current_phys += PAGE_SIZE_4K;
+    }
+
+    // Update the highest mapped physical address
+    highest_mapped_physical_addr = effective_total_gbs * PAGE_SIZE_1G;
+
+    // Flush TLB to ensure new mappings take effect
+    flushTLB();
+
+    serial.println("[PAGING] Extended mapping complete: now covering {} GB total", .{@divFloor(highest_mapped_physical_addr, PAGE_SIZE_1G)});
+}
 
 // Print page table info
 pub fn printInfo() void {
