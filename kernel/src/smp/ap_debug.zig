@@ -6,59 +6,59 @@ const per_cpu = @import("per_cpu.zig");
 const timer = @import("../x86_64/timer.zig");
 const spinlock = @import("../lib/spinlock.zig");
 
-/// AP initialization stages for debugging
+// AP initialization stages for debugging
 pub const ApStage = enum(u8) {
-    /// AP has not started yet
+    // AP has not started yet
     NotStarted = 0,
-    /// AP entered 16-bit real mode code
+    // AP entered 16-bit real mode code
     RealMode16 = 1,
-    /// AP transitioned to 32-bit protected mode
+    // AP transitioned to 32-bit protected mode
     ProtectedMode32 = 2,
-    /// AP enabled paging and entered long mode
+    // AP enabled paging and entered long mode
     LongMode64 = 3,
-    /// AP jumped to 64-bit kernel code
+    // AP jumped to 64-bit kernel code
     KernelEntry = 4,
-    /// AP loaded GDT/IDT
+    // AP loaded GDT/IDT
     GdtIdtLoaded = 5,
-    /// AP set up GSBASE for per-CPU data
+    // AP set up GSBASE for per-CPU data
     GsBaseSet = 6,
-    /// AP initialized Local APIC
+    // AP initialized Local APIC
     ApicInitialized = 7,
-    /// AP set up TSS and IST stacks
+    // AP set up TSS and IST stacks
     TssConfigured = 8,
-    /// AP enabled security features
+    // AP enabled security features
     SecurityEnabled = 9,
-    /// AP initialized subsystems
+    // AP initialized subsystems
     SubsystemsInit = 10,
-    /// AP signaled ready to BSP
+    // AP signaled ready to BSP
     SignaledReady = 11,
-    /// AP received proceed signal
+    // AP received proceed signal
     ProceedReceived = 12,
-    /// AP entered idle loop
+    // AP entered idle loop
     IdleLoop = 13,
-    /// AP encountered an error
+    // AP encountered an error
     Error = 255,
 };
 
-/// Detailed AP status information
+// Detailed AP status information
 pub const ApStatus = struct {
-    /// Current stage of initialization
+    // Current stage of initialization
     stage: ApStage = .NotStarted,
-    /// Error code if stage is Error
+    // Error code if stage is Error
     error_code: u32 = 0,
-    /// Timestamp when stage was entered (TSC value)
+    // Timestamp when stage was entered (TSC value)
     stage_timestamp: u64 = 0,
-    /// Number of times this AP has been started
+    // Number of times this AP has been started
     start_attempts: u32 = 0,
-    /// Flags for additional debugging
+    // Flags for additional debugging
     flags: u32 = 0,
-    /// Last known good stage before error
+    // Last known good stage before error
     last_good_stage: ApStage = .NotStarted,
-    /// Additional debug values (stage-specific)
+    // Additional debug values (stage-specific)
     debug_values: [4]u64 = [_]u64{0} ** 4,
 };
 
-/// Debug flags
+// Debug flags
 pub const DebugFlags = struct {
     pub const APIC_ERROR: u32 = 1 << 0;
     pub const MEMORY_ERROR: u32 = 1 << 1;
@@ -70,31 +70,31 @@ pub const DebugFlags = struct {
     pub const INVALID_CPU_ID: u32 = 1 << 7;
 };
 
-/// Global AP debug state
+// Global AP debug state
 pub const ApDebugState = struct {
-    /// Status for each AP (indexed by CPU ID)
+    // Status for each AP (indexed by CPU ID)
     ap_status: [per_cpu.MAX_CPUS]ApStatus = [_]ApStatus{.{}} ** per_cpu.MAX_CPUS,
-    /// Total number of APs that should start
+    // Total number of APs that should start
     expected_ap_count: u32 = 0,
-    /// Number of APs currently in each stage
+    // Number of APs currently in each stage
     stage_counts: [16]u32 = [_]u32{0} ** 16,
-    /// Global error counter
+    // Global error counter
     total_errors: u32 = 0,
-    /// Lock for updating shared state
+    // Lock for updating shared state
     lock: spinlock.SpinLock = .{},
-    /// Magic value to verify structure integrity
+    // Magic value to verify structure integrity
     magic: u64 = 0xABCDEF1234567890,
 };
 
-/// Global debug state instance
+// Global debug state instance
 pub var debug_state: ApDebugState = .{};
 
-/// Memory location for trampoline to update stages
-/// Located at a fixed address that trampoline can write to
-/// Changed to 0x500 to use safe conventional memory (0x500-0x7BFF)
+// Memory location for trampoline to update stages
+// Located at a fixed address that trampoline can write to
+// Changed to 0x500 to use safe conventional memory (0x500-0x7BFF)
 pub const TRAMPOLINE_DEBUG_ADDR: u64 = 0x500;
 
-/// Structure at TRAMPOLINE_DEBUG_ADDR for trampoline communication
+// Structure at TRAMPOLINE_DEBUG_ADDR for trampoline communication
 pub const TrampolineDebug = extern struct {
     magic: u32, // 0x12345678 to verify structure (at 0x500)
     cpu_id: u32, // CPU being initialized (at 0x504)
@@ -104,7 +104,7 @@ pub const TrampolineDebug = extern struct {
     debug_value: u64, // Additional debug value (at 0x510)
 };
 
-/// Check and process trampoline debug updates
+// Check and process trampoline debug updates
 pub fn checkTrampolineDebug() void {
     const debug_ptr = @as(*align(1) volatile TrampolineDebug, @ptrFromInt(TRAMPOLINE_DEBUG_ADDR));
 
@@ -126,7 +126,7 @@ pub fn checkTrampolineDebug() void {
     debug_ptr.magic = 0;
 }
 
-/// Update AP stage with atomic operations
+// Update AP stage with atomic operations
 pub fn updateApStage(cpu_id: u32, stage: ApStage) void {
     if (cpu_id >= per_cpu.MAX_CPUS) return;
 
@@ -154,7 +154,7 @@ pub fn updateApStage(cpu_id: u32, stage: ApStage) void {
     }
 }
 
-/// Record an error for an AP
+// Record an error for an AP
 pub fn recordApError(cpu_id: u32, error_code: u32, flags: u32) void {
     if (cpu_id >= per_cpu.MAX_CPUS) return;
 
@@ -170,7 +170,7 @@ pub fn recordApError(cpu_id: u32, error_code: u32, flags: u32) void {
     debug_state.total_errors += 1;
 }
 
-/// Set a debug value for current stage
+// Set a debug value for current stage
 pub fn setDebugValue(cpu_id: u32, index: usize, value: u64) void {
     if (cpu_id >= per_cpu.MAX_CPUS or index >= 4) return;
 
@@ -180,7 +180,7 @@ pub fn setDebugValue(cpu_id: u32, index: usize, value: u64) void {
     debug_state.ap_status[cpu_id].debug_values[index] = value;
 }
 
-/// Get current status for an AP
+// Get current status for an AP
 pub fn getApStatus(cpu_id: u32) ?ApStatus {
     if (cpu_id >= per_cpu.MAX_CPUS) return null;
 
@@ -190,7 +190,7 @@ pub fn getApStatus(cpu_id: u32) ?ApStatus {
     return debug_state.ap_status[cpu_id];
 }
 
-/// Get summary of all AP states
+// Get summary of all AP states
 pub fn getApSummary() ApSummary {
     const flags = debug_state.lock.acquire();
     defer debug_state.lock.release(flags);
@@ -214,7 +214,7 @@ pub fn getApSummary() ApSummary {
     return summary;
 }
 
-/// Summary structure for quick status check
+// Summary structure for quick status check
 pub const ApSummary = struct {
     not_started: u32 = 0,
     in_trampoline: u32 = 0,
@@ -225,7 +225,7 @@ pub const ApSummary = struct {
     total_errors: u32 = 0,
 };
 
-/// Initialize debug state
+// Initialize debug state
 pub fn init(expected_aps: u32) void {
     const flags = debug_state.lock.acquire();
     defer debug_state.lock.release(flags);
@@ -243,7 +243,7 @@ pub fn init(expected_aps: u32) void {
     debug_state.stage_counts[@intFromEnum(ApStage.NotStarted)] = expected_aps;
 }
 
-/// Check if all APs have reached a minimum stage
+// Check if all APs have reached a minimum stage
 pub fn allApsReachedStage(min_stage: ApStage) bool {
     const flags = debug_state.lock.acquire();
     defer debug_state.lock.release(flags);
@@ -258,7 +258,7 @@ pub fn allApsReachedStage(min_stage: ApStage) bool {
     return count == debug_state.expected_ap_count;
 }
 
-/// Wait for all APs to reach a stage with timeout
+// Wait for all APs to reach a stage with timeout
 pub fn waitForStage(min_stage: ApStage, timeout_ms: u64) bool {
     const start_time = timer.getUptime();
 
@@ -272,7 +272,7 @@ pub fn waitForStage(min_stage: ApStage, timeout_ms: u64) bool {
     return false;
 }
 
-/// Read TSC safely (handle case where TSC might not be available)
+// Read TSC safely (handle case where TSC might not be available)
 fn readTscSafe() u64 {
     // Check if RDTSC is available
     var eax: u32 = undefined;
@@ -305,7 +305,7 @@ fn readTscSafe() u64 {
     return 0;
 }
 
-/// Format stage name for display
+// Format stage name for display
 pub fn stageName(stage: ApStage) []const u8 {
     return switch (stage) {
         .NotStarted => "Not Started",
@@ -326,7 +326,7 @@ pub fn stageName(stage: ApStage) []const u8 {
     };
 }
 
-/// Dump debug information (can be called from panic handler)
+// Dump debug information (can be called from panic handler)
 pub fn dumpDebugInfo() void {
     // This function should work even without serial output
     // It just updates a memory structure that can be examined in debugger
@@ -352,7 +352,7 @@ pub fn dumpDebugInfo() void {
     }
 }
 
-/// Structure for debug dump at fixed address
+// Structure for debug dump at fixed address
 const ApDebugDump = extern struct {
     magic: u32,
     expected_aps: u32,

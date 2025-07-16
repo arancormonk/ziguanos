@@ -1,7 +1,7 @@
 // Copyright 2025 arancormonk
 // SPDX-License-Identifier: MIT
 
-//! Main ACPI interface for system configuration discovery
+// Main ACPI interface for system configuration discovery
 
 const std = @import("std");
 const tables = @import("tables.zig");
@@ -10,8 +10,9 @@ const madt = @import("madt.zig");
 const checksum = @import("checksum.zig");
 
 const serial = @import("../../drivers/serial.zig");
+const error_utils = @import("../../lib/error_utils.zig");
 
-/// ACPI subsystem state
+// ACPI subsystem state
 pub const AcpiSystem = struct {
     rsdp_descriptor: ?*const rsdp.RSDPDescriptor20,
     rsdt: ?*const rsdp.RSDT,
@@ -20,7 +21,7 @@ pub const AcpiSystem = struct {
     system_topology: ?madt.SystemTopology,
     allocator: std.mem.Allocator,
 
-    /// Initialize ACPI subsystem with RSDP address from UEFI
+    // Initialize ACPI subsystem with RSDP address from UEFI
     pub fn init(allocator: std.mem.Allocator, rsdp_address: ?u64) !AcpiSystem {
         var acpi = AcpiSystem{
             .rsdp_descriptor = null,
@@ -60,7 +61,7 @@ pub const AcpiSystem = struct {
         return acpi;
     }
 
-    /// Find and parse the MADT table
+    // Find and parse the MADT table
     fn findMADT(self: *AcpiSystem) !void {
         if (self.xsdt) |xsdt| {
             try rsdp.enumerateXSDT(xsdt, tables.Signature.MADT, madtCallback);
@@ -76,7 +77,7 @@ pub const AcpiSystem = struct {
 
             // Parse system topology
             self.system_topology = madt.parseMADT(self.madt_table.?, self.allocator) catch |err| {
-                serial.println("ACPI: Failed to parse MADT: {s}", .{@errorName(err)});
+                serial.println("ACPI: Failed to parse MADT: {s}", .{error_utils.errorToString(err)});
                 serial.println("ACPI: Continuing without full topology information", .{});
                 // Don't return error - let the system continue
                 return;
@@ -94,7 +95,7 @@ pub const AcpiSystem = struct {
         }
     }
 
-    /// Get system topology information
+    // Get system topology information
     pub fn getTopology(self: *const AcpiSystem) ?*const madt.SystemTopology {
         if (self.system_topology) |_| {
             return &self.system_topology.?;
@@ -102,7 +103,7 @@ pub const AcpiSystem = struct {
         return null;
     }
 
-    /// Find a specific ACPI table by signature
+    // Find a specific ACPI table by signature
     pub fn findTable(self: *const AcpiSystem, signature: []const u8) !?*const tables.Header {
         table_search_result = null;
         table_search_signature = signature;
@@ -116,7 +117,7 @@ pub const AcpiSystem = struct {
         return table_search_result;
     }
 
-    /// Cleanup ACPI resources
+    // Cleanup ACPI resources
     pub fn deinit(self: *AcpiSystem) void {
         if (self.system_topology) |topology| {
             self.allocator.free(topology.processors);
@@ -140,10 +141,10 @@ fn findTableCallback(header: *const tables.Header) !void {
     }
 }
 
-/// Global ACPI system instance
+// Global ACPI system instance
 var acpi_system: ?AcpiSystem = null;
 
-/// Initialize the global ACPI subsystem
+// Initialize the global ACPI subsystem
 pub fn initSystem(allocator: std.mem.Allocator, rsdp_address: ?u64) !void {
     if (acpi_system != null) {
         serial.println("ACPI: System already initialized", .{});
@@ -153,7 +154,7 @@ pub fn initSystem(allocator: std.mem.Allocator, rsdp_address: ?u64) !void {
     acpi_system = try AcpiSystem.init(allocator, rsdp_address);
 }
 
-/// Get the global ACPI system instance
+// Get the global ACPI system instance
 pub fn getSystem() ?*AcpiSystem {
     if (acpi_system) |*system| {
         return system;
@@ -161,7 +162,7 @@ pub fn getSystem() ?*AcpiSystem {
     return null;
 }
 
-/// Shutdown the ACPI subsystem
+// Shutdown the ACPI subsystem
 pub fn shutdown() void {
     if (acpi_system) |*system| {
         system.deinit();

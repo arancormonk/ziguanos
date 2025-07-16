@@ -14,8 +14,12 @@ const console = @import("../utils/console.zig");
 const error_handler = @import("../utils/error_handler.zig");
 const memory_manager = @import("../utils/memory_manager.zig");
 const secure_debug = @import("../security/secure_debug_integration.zig");
+const page_table_calculator = @import("page_table_calculator.zig");
+const page_table_allocator = @import("page_table_allocator.zig");
+const boot_protocol = @import("shared");
+const memory = @import("memory.zig");
 
-/// Main boot coordination function
+// Main boot coordination function
 pub fn boot(handle: uefi.Handle) !void {
     // Phase 1: Initialize console and display banner
     console.printBanner();
@@ -49,17 +53,70 @@ pub fn boot(handle: uefi.Handle) !void {
     // Print security violation summary
     policy.printViolationSummary() catch {};
 
-    // Phase 5: Prepare for kernel handoff
+    // Phase 5: Calculate and allocate page tables
+    console.println("Calculating page table requirements...");
+
+    // Get memory map for analysis (before exit boot services)
+    const preliminary_map = memory_manager.getMemoryMap() catch {
+        console.println("Failed to get memory map for page table calculation");
+        error_handler.uefiError(.out_of_resources);
+    };
+
+    // Calculate page table requirements
+    // The memory descriptors are at preliminary_map.descriptors, and the size is the total byte size
+    const descriptor_bytes = @as([*]const u8, @ptrCast(preliminary_map.descriptors));
+    const requirements = page_table_calculator.calculateRequirements(descriptor_bytes[0..preliminary_map.size], preliminary_map.descriptor_size);
+
+    // Allocate page tables
+    console.println("Allocating page tables...");
+
+    // Create a local memory tracker for page tables
+    var page_table_allocations = memory.AllocatedMemory{};
+
+    const page_tables = page_table_allocator.allocatePageTables(uefi_globals.boot_services, requirements, &page_table_allocations) catch {
+        console.println("Failed to allocate page tables");
+        error_handler.uefiError(.out_of_resources);
+    };
+
+    // Store page table info in kernel_info for later use
+    // We'll need to pass this to jumpToKernel
+    const page_table_info = boot_protocol.PageTableInfo{
+        .pml4_phys_addr = page_tables.pml4_addr,
+        .pdpt_phys_addr = page_tables.pdpt_addr,
+        .pd_table_base = page_tables.pd_base_addr,
+        .pd_table_count = page_tables.pd_count,
+        .pt_table_base = page_tables.pt_base_addr,
+        .pt_table_count = page_tables.pt_count,
+        .highest_mapped_addr = requirements.highest_physical_addr,
+        .total_pages_allocated = page_tables.total_pages,
+        ._padding = 0,
+    };
+
+    // Phase 6: Set page table info in boot_info BEFORE exiting boot services
+    if (kernel_info.boot_info) |boot_info| {
+        boot_info.page_table_info = page_table_info;
+        serial.print("[UEFI] Set page table info in boot_info: PML4=0x{x}, PDPT=0x{x}, PD base=0x{x} (count={}), PT base=0x{x} (count={})\r\n", .{
+            page_table_info.pml4_phys_addr,
+            page_table_info.pdpt_phys_addr,
+            page_table_info.pd_table_base,
+            page_table_info.pd_table_count,
+            page_table_info.pt_table_base,
+            page_table_info.pt_table_count,
+        }) catch {};
+    }
+
+    // Phase 7: Prepare for kernel handoff
     console.println("Getting memory map...");
     const memory_map = try prepareMemoryMapAndExitBootServices(handle);
 
-    // Phase 6: Jump to kernel
+    // Phase 8: Jump to kernel
     secure_debug.printJumpToKernel(kernel_info.entry_point);
     const kl_memory_map = memory_manager.convertToKernelLoaderFormat(memory_map);
+
     kernel_loader.jumpToKernel(kernel_info, kl_memory_map);
 }
 
-/// Initialize all security subsystems
+// Initialize all security subsystems
 fn initializeSecurity(handle: uefi.Handle) !void {
     // Initialize variable cache first to prevent TOCTOU vulnerabilities
     variable_cache.initWithFileSupport(
@@ -120,7 +177,7 @@ fn initializeSecurity(handle: uefi.Handle) !void {
     }
 }
 
-/// Run debug tests if in debug mode
+// Run debug tests if in debug mode
 fn runDebugTests() void {
     const test_error_sanitizer = @import("../security/tests/error_sanitizer_test.zig");
     test_error_sanitizer.runErrorSanitizerTests() catch |err| {
@@ -128,7 +185,7 @@ fn runDebugTests() void {
     };
 }
 
-/// Load and verify the kernel
+// Load and verify the kernel
 fn loadAndVerifyKernel(handle: uefi.Handle) !kernel_loader.KernelInfo {
     return kernel_loader.loadKernel(handle, uefi_globals.boot_services, uefi_globals.uefi_allocator) catch |err| {
         console.print("Failed to load kernel: ");
@@ -143,7 +200,7 @@ fn loadAndVerifyKernel(handle: uefi.Handle) !kernel_loader.KernelInfo {
     };
 }
 
-/// Get memory map and exit boot services
+// Get memory map and exit boot services
 fn prepareMemoryMapAndExitBootServices(handle: uefi.Handle) !memory_manager.MemoryMap {
     var memory_map = memory_manager.getMemoryMap() catch {
         console.println("Failed to get memory map");

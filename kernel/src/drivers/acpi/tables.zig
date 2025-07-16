@@ -1,14 +1,14 @@
 // Copyright 2025 arancormonk
 // SPDX-License-Identifier: MIT
 
-//! ACPI table structure definitions following the ACPI specification
+// ACPI table structure definitions following the ACPI specification
 
 const std = @import("std");
 
-/// ACPI table signature length
+// ACPI table signature length
 pub const SIGNATURE_LENGTH = 4;
 
-/// Common ACPI table header used by all tables
+// Common ACPI table header used by all tables
 pub const Header = extern struct {
     signature: [SIGNATURE_LENGTH]u8,
     length: u32,
@@ -30,7 +30,7 @@ pub const Header = extern struct {
     }
 };
 
-/// Generic Address Structure (GAS)
+// Generic Address Structure (GAS)
 pub const GenericAddress = extern struct {
     address_space_id: u8,
     register_bit_width: u8,
@@ -39,7 +39,7 @@ pub const GenericAddress = extern struct {
     address: u64,
 };
 
-/// Known ACPI table signatures
+// Known ACPI table signatures
 pub const Signature = struct {
     pub const RSDP = "RSD PTR "; // Note: 8 bytes with space
     pub const RSDT = "RSDT";
@@ -52,13 +52,13 @@ pub const Signature = struct {
     pub const DSDT = "DSDT";
 };
 
-/// ACPI revision numbers
+// ACPI revision numbers
 pub const Revision = struct {
     pub const ACPI_1_0 = 0;
     pub const ACPI_2_0 = 2;
 };
 
-/// Address space IDs for Generic Address Structure
+// Address space IDs for Generic Address Structure
 pub const AddressSpace = enum(u8) {
     SystemMemory = 0,
     SystemIO = 1,
@@ -74,7 +74,7 @@ pub const AddressSpace = enum(u8) {
     _,
 };
 
-/// ACPI error types
+// ACPI error types
 pub const Error = error{
     InvalidSignature,
     InvalidChecksum,

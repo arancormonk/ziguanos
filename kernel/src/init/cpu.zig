@@ -11,8 +11,9 @@ const smap = @import("../x86_64/smap.zig");
 const ap_cpu_init = @import("../smp/ap_cpu_init.zig");
 const ipi = @import("../smp/ipi.zig");
 const call_function = @import("../smp/call_function.zig");
+const error_utils = @import("../lib/error_utils.zig");
 
-/// Initialize CPU features and security mechanisms
+// Initialize CPU features and security mechanisms
 pub fn init() void {
     // Detect CPU features
     cpuid.detectFeatures();
@@ -40,11 +41,11 @@ pub fn init() void {
     serial.println("[KERNEL] BSP CPU features saved for AP verification", .{});
 }
 
-/// Initialize complete CPU features after memory management is ready
+// Initialize complete CPU features after memory management is ready
 pub fn initComplete() !void {
     // Initialize complete CET support now that memory management is ready
     cpu_init.initializeCETComplete() catch |err| {
-        serial.println("[KERNEL] ERROR: Complete CET initialization failed: {s}", .{@errorName(err)});
+        serial.println("[KERNEL] ERROR: Complete CET initialization failed: {s}", .{error_utils.errorToString(err)});
         serial.flush();
         return err;
     };
@@ -64,16 +65,16 @@ pub fn initComplete() !void {
     serial.flush();
 }
 
-/// Test CFI functionality
+// Test CFI functionality
 pub fn testCFI() void {
     serial.println("[KERNEL] Testing Control Flow Integrity (CFI)...", .{});
     cfi.selfTest() catch |err| {
-        serial.println("[KERNEL] CFI self-test failed: {s}", .{@errorName(err)});
+        serial.println("[KERNEL] CFI self-test failed: {s}", .{error_utils.errorToString(err)});
         serial.flush();
     };
 }
 
-/// Print CPU-related statistics
+// Print CPU-related statistics
 pub fn printStatistics() void {
     // Print SMAP statistics
     smap.printStats();

@@ -7,6 +7,7 @@ const serial = @import("../../drivers/serial.zig");
 const secure_print = @import("../../lib/secure_print.zig");
 const uefi_boot = @import("../../boot/uefi_boot.zig");
 const runtime_info = @import("../../boot/runtime_info.zig");
+const error_utils = @import("../../lib/error_utils.zig");
 
 const PAGE_SIZE: u64 = 0x1000; // 4KB pages
 const PAGES_PER_BITMAP: u64 = 64; // One u64 bitmap entry tracks 64 pages
@@ -93,7 +94,7 @@ pub fn addGuardPagesAroundRegion(start: u64, size: u64, createGuardPageFn: fn (u
     if (start >= PAGE_SIZE) {
         const guard_before = (start - PAGE_SIZE) & ~(PAGE_SIZE - 1);
         createGuardPageFn(guard_before) catch |err| {
-            serial.print("[PMM] Warning: Could not create guard page before region: {s}\n", .{@errorName(err)});
+            serial.print("[PMM] Warning: Could not create guard page before region: {s}\n", .{error_utils.errorToString(err)});
         };
     }
 
@@ -101,6 +102,6 @@ pub fn addGuardPagesAroundRegion(start: u64, size: u64, createGuardPageFn: fn (u
     const end = start + size;
     const guard_after = (end + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
     createGuardPageFn(guard_after) catch |err| {
-        serial.print("[PMM] Warning: Could not create guard page after region: {s}\n", .{@errorName(err)});
+        serial.print("[PMM] Warning: Could not create guard page after region: {s}\n", .{error_utils.errorToString(err)});
     };
 }

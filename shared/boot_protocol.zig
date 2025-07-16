@@ -41,6 +41,22 @@ pub const MemoryDescriptor = extern struct {
 // SHA-256 hash size
 pub const SHA256_SIZE = 32;
 
+// Page table information passed from bootloader to kernel
+pub const PageTableInfo = extern struct {
+    // Pre-allocated page table addresses (physical)
+    pml4_phys_addr: u64, // PML4 table (always 1)
+    pdpt_phys_addr: u64, // PDPT table (always 1)
+    pd_table_base: u64, // Base address of PD table array
+    pd_table_count: u32, // Number of PD tables allocated
+    pt_table_base: u64, // Base address of PT table array (for kernel fine-grain)
+    pt_table_count: u32, // Number of PT tables allocated
+
+    // Memory mapping information
+    highest_mapped_addr: u64, // Highest physical address that will be mapped
+    total_pages_allocated: u32, // Total 4KB pages allocated for all tables
+    _padding: u32, // Alignment padding
+};
+
 // Boot information passed from bootloader to kernel
 pub const BootInfo = extern struct {
     magic: u64, // Magic number for validation
@@ -66,6 +82,9 @@ pub const BootInfo = extern struct {
     has_hardware_rng: bool, // Whether hardware RNG was available
     _padding3: [5]u8, // Padding for alignment
 
+    // Page table information from bootloader
+    page_table_info: PageTableInfo,
+
     // Reserved for future use
-    reserved: [24]u64, // Reduced from 28 to accommodate entropy fields
+    reserved: [21]u64, // Reduced from 24 to accommodate page table info
 };

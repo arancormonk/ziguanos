@@ -1,12 +1,12 @@
 // Copyright 2025 arancormonk
 // SPDX-License-Identifier: MIT
 
-//! MADT (Multiple APIC Description Table) parsing for CPU and interrupt controller discovery
+// MADT (Multiple APIC Description Table) parsing for CPU and interrupt controller discovery
 
 const std = @import("std");
 const tables = @import("tables.zig");
 
-/// MADT structure types
+// MADT structure types
 pub const MadtEntryType = enum(u8) {
     ProcessorLocalApic = 0,
     IoApic = 1,
@@ -27,7 +27,7 @@ pub const MadtEntryType = enum(u8) {
     _,
 };
 
-/// MADT header structure
+// MADT header structure
 pub const MADT = extern struct {
     header: tables.Header,
     local_apic_address: u32,
@@ -43,13 +43,13 @@ pub const MADT = extern struct {
     }
 };
 
-/// Common header for all MADT entries
+// Common header for all MADT entries
 pub const MadtEntryHeader = extern struct {
     entry_type: u8,
     length: u8,
 };
 
-/// Processor Local APIC structure
+// Processor Local APIC structure
 pub const ProcessorLocalApic = extern struct {
     header: MadtEntryHeader,
     acpi_processor_id: u8,
@@ -65,7 +65,7 @@ pub const ProcessorLocalApic = extern struct {
     }
 };
 
-/// I/O APIC structure
+// I/O APIC structure
 pub const IoApic = extern struct {
     header: MadtEntryHeader,
     io_apic_id: u8,
@@ -74,7 +74,7 @@ pub const IoApic = extern struct {
     global_system_interrupt_base: u32,
 };
 
-/// Interrupt Source Override structure
+// Interrupt Source Override structure
 pub const InterruptSourceOverride = extern struct {
     header: MadtEntryHeader,
     bus: u8,
@@ -91,14 +91,14 @@ pub const InterruptSourceOverride = extern struct {
     }
 };
 
-/// NMI Source structure
+// NMI Source structure
 pub const NmiSource = extern struct {
     header: MadtEntryHeader,
     flags: u16,
     global_system_interrupt: u32,
 };
 
-/// Local APIC NMI structure
+// Local APIC NMI structure
 pub const LocalApicNmi = extern struct {
     header: MadtEntryHeader,
     acpi_processor_id: u8, // 0xFF means all processors
@@ -106,14 +106,14 @@ pub const LocalApicNmi = extern struct {
     lint: u8, // 0 or 1
 };
 
-/// Local APIC Address Override structure
+// Local APIC Address Override structure
 pub const LocalApicAddressOverride = extern struct {
     header: MadtEntryHeader,
     reserved: u16,
     local_apic_address: u64,
 };
 
-/// Processor Local x2APIC structure (for > 255 CPUs)
+// Processor Local x2APIC structure (for > 255 CPUs)
 pub const ProcessorLocalX2Apic = extern struct {
     header: MadtEntryHeader,
     reserved: u16,
@@ -126,7 +126,7 @@ pub const ProcessorLocalX2Apic = extern struct {
     }
 };
 
-/// Interrupt polarity
+// Interrupt polarity
 pub const Polarity = enum(u2) {
     ConformToSpec = 0,
     ActiveHigh = 1,
@@ -134,7 +134,7 @@ pub const Polarity = enum(u2) {
     ActiveLow = 3,
 };
 
-/// Interrupt trigger mode
+// Interrupt trigger mode
 pub const TriggerMode = enum(u2) {
     ConformToSpec = 0,
     Edge = 1,
@@ -142,7 +142,7 @@ pub const TriggerMode = enum(u2) {
     Level = 3,
 };
 
-/// Iterator for MADT entries
+// Iterator for MADT entries
 pub const MadtEntryIterator = struct {
     current: [*]const u8,
     end: [*]const u8,
@@ -175,7 +175,7 @@ pub const MadtEntryIterator = struct {
     }
 };
 
-/// Processor information extracted from MADT
+// Processor information extracted from MADT
 pub const ProcessorInfo = struct {
     processor_id: u8,
     apic_id: u32, // u32 to support x2APIC
@@ -187,7 +187,7 @@ pub const ProcessorInfo = struct {
     }
 };
 
-/// System topology information
+// System topology information
 pub const SystemTopology = struct {
     processors: []ProcessorInfo,
     io_apics: []IoApicInfo,
@@ -197,7 +197,7 @@ pub const SystemTopology = struct {
     has_legacy_pic: bool,
 };
 
-/// I/O APIC information
+// I/O APIC information
 pub const IoApicInfo = struct {
     io_apic_id: u8,
     io_apic_address: u32,
@@ -207,7 +207,7 @@ pub const IoApicInfo = struct {
 const MAX_PROCESSORS = 256;
 const MAX_IO_APICS = 16;
 
-/// Parse MADT and extract system topology
+// Parse MADT and extract system topology
 pub fn parseMADT(madt: *const MADT, allocator: std.mem.Allocator) !SystemTopology {
     // Use fixed-size arrays instead of ArrayList
     var processors_buffer: [MAX_PROCESSORS]ProcessorInfo = undefined;

@@ -16,7 +16,7 @@ extern fn _start() void;
 // Forward declaration of kernel main
 extern fn kernelMain(boot_info: *const UEFIBootInfo) noreturn;
 
-/// Handle PIE (Position Independent Executable) boot mode
+// Handle PIE (Position Independent Executable) boot mode
 pub fn handlePIEBoot(boot_info: *const UEFIBootInfo) noreturn {
     // We're currently executing at physical addresses
     // The bootloader has set up page tables but they're not active yet
@@ -43,7 +43,7 @@ pub fn handlePIEBoot(boot_info: *const UEFIBootInfo) noreturn {
     continueKernelInit(boot_info);
 }
 
-/// Handle normal (identity-mapped) boot mode
+// Handle normal (identity-mapped) boot mode
 pub fn handleNormalBoot(boot_info: *const UEFIBootInfo) noreturn {
     // Traditional mode: Already at virtual addresses
 
@@ -57,7 +57,7 @@ pub fn handleNormalBoot(boot_info: *const UEFIBootInfo) noreturn {
     continueKernelInit(boot_info);
 }
 
-/// Enable page tables from bootloader
+// Enable page tables from bootloader
 fn enableBootloaderPageTables(_: *const UEFIBootInfo) void {
     // The bootloader should pass us the CR3 value to use
     // For now, we need to coordinate with the bootloader's VMM structure
@@ -80,7 +80,7 @@ fn enableBootloaderPageTables(_: *const UEFIBootInfo) void {
     @panic("PIE mode page table activation not yet implemented - needs bootloader coordination");
 }
 
-/// Continue kernel initialization after boot mode handling
+// Continue kernel initialization after boot mode handling
 pub fn continueKernelInit(boot_info: *const UEFIBootInfo) noreturn {
     // Jump directly to kernelMain which will handle all initialization
     kernelMain(boot_info);

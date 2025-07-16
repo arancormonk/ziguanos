@@ -8,6 +8,7 @@ const stack_security = @import("../x86_64/stack_security.zig");
 const serial = @import("../drivers/serial.zig");
 const runtime_info = @import("../boot/runtime_info.zig");
 const heap = @import("heap.zig");
+const error_utils = @import("../lib/error_utils.zig");
 
 // Virtual memory layout - dynamic based on kernel load address
 const KERNEL_HEAP_SIZE = 1024 * 1024 * 1024; // 1GB initial heap
@@ -505,7 +506,7 @@ pub fn runTests() void {
         // Use VMM's mapPage which creates page tables as needed
         // Include PAGE_NO_EXECUTE to match the original huge page flags
         mapPage(test_virt, test_phys, paging.PAGE_PRESENT | paging.PAGE_WRITABLE | paging.PAGE_NO_EXECUTE) catch |err| {
-            serial.println("[VMM] Test 1 failed: mapPage error {s}", .{@errorName(err)});
+            serial.println("[VMM] Test 1 failed: mapPage error {s}", .{error_utils.errorToString(err)});
             pmm.freePages(test_phys, 1);
             return;
         };
@@ -709,7 +710,7 @@ pub fn runTests() void {
 
     // Test 3: Heap allocation
     const ptr1 = heapAlloc(1024) catch |err| {
-        serial.println("[VMM] Test 3 failed: Heap allocation error {s}", .{@errorName(err)});
+        serial.println("[VMM] Test 3 failed: Heap allocation error {s}", .{error_utils.errorToString(err)});
         return;
     };
     serial.printAddress("[VMM] Test 3 passed: Allocated from heap at", @intFromPtr(ptr1));
@@ -726,13 +727,13 @@ pub fn runTests() void {
 
     // Test 5: Multiple allocations
     const ptr2 = heapAlloc(2048) catch |err| {
-        serial.println("[VMM] Test 5 failed: Second allocation error {s}", .{@errorName(err)});
+        serial.println("[VMM] Test 5 failed: Second allocation error {s}", .{error_utils.errorToString(err)});
         heapFree(ptr1);
         return;
     };
 
     const ptr3 = heapAlloc(512) catch |err| {
-        serial.println("[VMM] Test 5 failed: Third allocation error {s}", .{@errorName(err)});
+        serial.println("[VMM] Test 5 failed: Third allocation error {s}", .{error_utils.errorToString(err)});
         heapFree(ptr1);
         heapFree(ptr2);
         return;
@@ -748,7 +749,7 @@ pub fn runTests() void {
 
     // Test 7: Allocation after free (reuse test)
     const ptr4 = heapAlloc(1024) catch |err| {
-        serial.println("[VMM] Test 7 failed: Reallocation error {s}", .{@errorName(err)});
+        serial.println("[VMM] Test 7 failed: Reallocation error {s}", .{error_utils.errorToString(err)});
         return;
     };
     heapFree(ptr4);

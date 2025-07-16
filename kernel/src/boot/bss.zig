@@ -12,9 +12,9 @@ extern const __bss_end: u8;
 // UEFI boot info structure
 const UEFIBootInfo = uefi_boot.UEFIBootInfo;
 
-/// Clear BSS section while preserving the given boot info structure
-/// This is necessary because the BSS section contains uninitialized global variables
-/// that need to be zeroed, but we must preserve the saved boot info
+// Clear BSS section while preserving the given boot info structure
+// This is necessary because the BSS section contains uninitialized global variables
+// that need to be zeroed, but we must preserve the saved boot info
 pub fn clearBSSPreserving(preserved_data: *const anyopaque, preserved_size: usize) void {
     const bss_start = @intFromPtr(&__bss_start);
     const bss_end = @intFromPtr(&__bss_end);

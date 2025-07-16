@@ -235,7 +235,7 @@ fn setVariableMTRR(base_addr: u64, size: u64, mem_type: u8) !void {
     serial.println("[SMP] Set MTRR slot {} for 0x{x}-0x{x} to type {}", .{ slot.?, base_addr, base_addr + size - 1, mem_type });
 }
 
-/// Initialize an Application Processor
+// Initialize an Application Processor
 pub fn initAP(cpu_id: u32, apic_id: u8) !void {
     serial.println("[SMP] Starting AP: CPU {} (APIC ID {})", .{ cpu_id, apic_id });
 
@@ -586,7 +586,7 @@ fn checkMemoryPattern(addr: u64, size: usize) void {
     }
 }
 
-/// Setup the trampoline code in low memory
+// Setup the trampoline code in low memory
 fn setupTrampoline() !void {
     const flags = startup_lock.acquire();
     defer startup_lock.release(flags);
@@ -884,8 +884,8 @@ fn setupTrampoline() !void {
     }
 }
 
-/// Ensure the trampoline memory is identity mapped
-/// Intel SDM 4.2: Identity mapping means virtual address = physical address
+// Ensure the trampoline memory is identity mapped
+// Intel SDM 4.2: Identity mapping means virtual address = physical address
 fn ensureTrampolineIdentityMapped() !void {
     // Intel SDM 10.4.4: The AP starts in real mode at the physical address
     // specified by the SIPI vector. This requires identity mapping.
@@ -903,7 +903,7 @@ fn ensureTrampolineIdentityMapped() !void {
 
     // Check if we can access the trampoline area
     const test_access = paging.getPhysicalAddress(TRAMPOLINE_ADDR) catch |err| {
-        serial.println("[SMP] ERROR: Trampoline area at 0x{x} is not accessible: {s}", .{ TRAMPOLINE_ADDR, @errorName(err) });
+        serial.println("[SMP] ERROR: Trampoline area at 0x{x} is not accessible: {s}", .{ TRAMPOLINE_ADDR, error_utils.errorToString(err) });
 
         // The first GB should be mapped with 2MB pages. If it's not accessible,
         // there's a fundamental issue with the page tables
@@ -965,7 +965,7 @@ fn ensureTrampolineIdentityMapped() !void {
 
     // Verify debug region mapping
     _ = paging.getPhysicalAddress(0x500) catch |err| {
-        serial.println("[SMP] WARNING: Debug region at 0x500 not mapped: {s}", .{@errorName(err)});
+        serial.println("[SMP] WARNING: Debug region at 0x500 not mapped: {s}", .{error_utils.errorToString(err)});
         // This is OK - the debug region is in the first page which we skip for null protection
         // The important thing is that the trampoline at 0x8000 is accessible
     };
@@ -974,7 +974,7 @@ fn ensureTrampolineIdentityMapped() !void {
     serial.println("[SMP] Trampoline at 0x{x} is identity mapped and ready", .{TRAMPOLINE_ADDR});
 }
 
-/// Find the exception handler offset in the trampoline
+// Find the exception handler offset in the trampoline
 fn findExceptionHandlerOffset(buffer: [*]const u8, size: usize) usize {
     // Look for the exception handler pattern:
     // movl $0xDEADBEEF, 0x518
@@ -1002,7 +1002,7 @@ fn findExceptionHandlerOffset(buffer: [*]const u8, size: usize) usize {
     return 0x6F; // Approximate offset based on assembly listing
 }
 
-/// Find the ap_startup_data offset in a buffer
+// Find the ap_startup_data offset in a buffer
 fn findStartupDataOffsetStatic(buffer: [*]const u8, size: usize) usize {
     // The ap_startup_data section starts with the GDT which has a known pattern:
     // - Null descriptor: 0x0000000000000000
@@ -1027,7 +1027,7 @@ fn findStartupDataOffsetStatic(buffer: [*]const u8, size: usize) usize {
     return 0x170; // 368 bytes from trampoline start
 }
 
-/// Find the ap_startup_data offset in the trampoline
+// Find the ap_startup_data offset in the trampoline
 fn findStartupDataOffset() usize {
     // The ap_startup_data section starts with the GDT which has a known pattern:
     // - Null descriptor: 0x0000000000000000
@@ -1054,7 +1054,7 @@ fn findStartupDataOffset() usize {
     return 0x170; // 368 bytes from trampoline start
 }
 
-/// Update trampoline data for specific CPU
+// Update trampoline data for specific CPU
 fn updateTrampolineData(cpu_id: u32, stack_top: [*]u8, cpu_data: *per_cpu.CpuData) usize {
     // Find the actual offset of ap_startup_data
     const ap_startup_data_offset = findStartupDataOffset();
@@ -1263,7 +1263,7 @@ fn setupKernelDescriptorPointers(ap_startup_data_base: u64) void {
     asm volatile ("mfence" ::: "memory");
 }
 
-/// Simple busy wait for AP startup (doesn't require interrupts or TSC)
+// Simple busy wait for AP startup (doesn't require interrupts or TSC)
 fn busyWait(iterations: u32) void {
     var i: u32 = 0;
     while (i < iterations) : (i += 1) {
@@ -1271,8 +1271,8 @@ fn busyWait(iterations: u32) void {
     }
 }
 
-/// PIT-based delay using polling (no interrupts required)
-/// Uses PIT channel 2 which is typically used for PC speaker
+// PIT-based delay using polling (no interrupts required)
+// Uses PIT channel 2 which is typically used for PC speaker
 fn pitPollingDelay(microseconds: u64) void {
     // PIT frequency is 1193182 Hz
     const PIT_FREQUENCY: u64 = 1193182;
@@ -1298,7 +1298,7 @@ fn pitPollingDelay(microseconds: u64) void {
     pitPollingDelayTicks(@intCast(ticks_needed));
 }
 
-/// Helper to delay for a specific number of PIT ticks
+// Helper to delay for a specific number of PIT ticks
 fn pitPollingDelayTicks(ticks: u16) void {
     const PIT_CHANNEL2: u16 = 0x42;
     const PIT_COMMAND: u16 = 0x43;
@@ -1355,8 +1355,8 @@ fn pitPollingDelayTicks(ticks: u16) void {
     );
 }
 
-/// Send INIT-SIPI-SIPI sequence to start AP
-/// Intel SDM 10.4.4: MP Initialization Example
+// Send INIT-SIPI-SIPI sequence to start AP
+// Intel SDM 10.4.4: MP Initialization Example
 fn sendInitSipiSipi(apic_id: u8) !void {
     // Intel SDM 10.4.2: All devices capable of delivering interrupts must be inhibited
     // Disable interrupts for the entire sequence
@@ -1769,7 +1769,7 @@ fn sendInitSipiSipi(apic_id: u8) !void {
     }
 }
 
-/// Start all Application Processors
+// Start all Application Processors
 pub fn startAllAPs(processor_info: []const per_cpu.ProcessorInfo) !void {
     serial.println("[SMP] Starting {} Application Processors", .{processor_info.len - 1});
 
@@ -1838,7 +1838,7 @@ pub fn startAllAPs(processor_info: []const per_cpu.ProcessorInfo) !void {
     serial.println("  Total errors: {}", .{summary.total_errors});
 }
 
-/// Entry point for APs (called from assembly trampoline)
+// Entry point for APs (called from assembly trampoline)
 export fn apMainEntry(cpu_id: u32) callconv(.C) noreturn {
     // This is called with interrupts disabled
 
@@ -1891,17 +1891,17 @@ export fn apMainEntry(cpu_id: u32) callconv(.C) noreturn {
     }
 }
 
-/// Get AP startup state for debugging
+// Get AP startup state for debugging
 pub fn getStartupState() *const ApStartupState {
     return &startup_state;
 }
 
-/// Get detected CPU count from ACPI
+// Get detected CPU count from ACPI
 pub fn getDetectedCpuCount() u32 {
     return per_cpu.getCpuCount();
 }
 
-/// Get online CPU count (BSP + ready APs)
+// Get online CPU count (BSP + ready APs)
 pub fn getOnlineCpuCount() u32 {
     return 1 + @atomicLoad(u32, &startup_state.ap_ready_count, .acquire);
 }

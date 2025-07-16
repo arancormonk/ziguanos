@@ -22,7 +22,7 @@ const per_cpu_gdt = @import("../x86_64/per_cpu_gdt.zig");
 const ap_cpu_init = @import("ap_cpu_init.zig");
 const ipi = @import("ipi.zig");
 
-/// Application Processor main entry point
+// Application Processor main entry point
 pub fn apMain(cpu_id: u32, cpu_data: *per_cpu.CpuData) !void {
     // Write a simple debug marker to verify we reached kernel code
     const debug_marker = @as(*volatile u32, @ptrFromInt(0x10000));
@@ -123,7 +123,7 @@ pub fn apMain(cpu_id: u32, cpu_data: *per_cpu.CpuData) !void {
     idleLoop();
 }
 
-/// Setup TSS for Application Processor
+// Setup TSS for Application Processor
 fn setupApTss(cpu_data: *per_cpu.CpuData) !void {
     // IST stacks are allocated by interrupt_security module
     try interrupt_security.allocateIstStacks(@intCast(cpu_data.cpu_id));
@@ -152,7 +152,7 @@ fn setupApTss(cpu_data: *per_cpu.CpuData) !void {
     per_cpu_gdt.updateTssForCpu(@intCast(cpu_data.cpu_id), kernel_stack_ptr, &ist_stack_ptrs);
 }
 
-/// Enable security features on Application Processor
+// Enable security features on Application Processor
 fn enableApSecurityFeatures(cpu_data: *per_cpu.CpuData) void {
     // Enable SMAP (Supervisor Mode Access Prevention)
     // SMAP needs to be enabled per-CPU by setting CR4.SMAP
@@ -175,7 +175,7 @@ fn enableApSecurityFeatures(cpu_data: *per_cpu.CpuData) void {
     };
 }
 
-/// Initialize AP-specific subsystems
+// Initialize AP-specific subsystems
 fn initApSubsystems(cpu_id: u32) !void {
     // Allocate per-CPU data for this AP
     try cpu_local.allocatePerCpuData(cpu_id);
@@ -186,8 +186,8 @@ fn initApSubsystems(cpu_id: u32) !void {
     serial.println("[SMP] AP {} APIC timer frequency: {} Hz", .{ cpu_id, timer_freq });
 }
 
-/// CPU idle loop
-/// Intel SDM 10.4.4.2 Step 13: Execute CLI and HLT instructions
+// CPU idle loop
+// Intel SDM 10.4.4.2 Step 13: Execute CLI and HLT instructions
 fn idleLoop() noreturn {
     // Intel SDM 10.4.3 Step 9: APs remain in halted state
     // They respond only to INIT, NMI, SMI, and STPCLK#
@@ -205,7 +205,7 @@ fn idleLoop() noreturn {
     }
 }
 
-/// Handle pending IPIs
+// Handle pending IPIs
 fn handlePendingIpis(cpu_data: *per_cpu.CpuData) void {
     const pending = @atomicLoad(u32, &cpu_data.ipi_pending, .seq_cst);
     @atomicStore(u32, &cpu_data.ipi_pending, 0, .seq_cst);
@@ -228,7 +228,7 @@ fn handlePendingIpis(cpu_data: *per_cpu.CpuData) void {
     }
 }
 
-/// AP panic handler
+// AP panic handler
 pub fn apPanic(msg: []const u8, error_trace: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn {
     _ = error_trace; // TODO: Use when we have stack trace support
 
@@ -279,7 +279,7 @@ pub fn apPanic(msg: []const u8, error_trace: ?*std.builtin.StackTrace, ret_addr:
     }
 }
 
-/// Panic info structure at fixed address 0x11000
+// Panic info structure at fixed address 0x11000
 const PanicInfo = extern struct {
     magic: u32,
     cpu_id: u32,

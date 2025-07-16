@@ -10,8 +10,8 @@ const stack_security = @import("../x86_64/stack_security.zig");
 // UEFI boot info structure
 const UEFIBootInfo = uefi_boot.UEFIBootInfo;
 
-/// Perform early initialization tasks
-/// This includes IDT setup, stack security, and serial initialization
+// Perform early initialization tasks
+// This includes IDT setup, stack security, and serial initialization
 pub fn init(boot_info: *const UEFIBootInfo) void {
     // Set up minimal IDT with critical exception handlers before stack switch
     idt.initMinimal();

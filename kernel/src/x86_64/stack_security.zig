@@ -12,6 +12,7 @@ const rng = @import("rng.zig");
 const secure_print = @import("../lib/secure_print.zig");
 const SpinLock = @import("../lib/spinlock.zig").SpinLock;
 const SpinLockGuard = @import("../lib/spinlock.zig").SpinLockGuard;
+const error_utils = @import("../lib/error_utils.zig");
 
 // Stack canary value - should be randomized at boot
 var stack_canary: u64 = 0xDEADBEEFCAFEBABE;
@@ -1136,7 +1137,7 @@ pub fn switchToCpuStack(cpu_id: u8) void {
             secure_print.printHex("", cpu_shadow_stack.ptr);
             serial.println("", .{});
             cpu_init.switchShadowStack(cpu_shadow_stack.ptr) catch |err| {
-                serial.println("[STACK] WARNING: Failed to switch shadow stack: {s}", .{@errorName(err)});
+                serial.println("[STACK] WARNING: Failed to switch shadow stack: {s}", .{error_utils.errorToString(err)});
                 // Continue with normal stack switch even if shadow stack fails
             };
         } else {
@@ -1193,7 +1194,7 @@ pub fn initializePerCpuShadowStacks(num_cpus: u8) !void {
     while (cpu_id < num_cpus and cpu_id < MAX_CPUS) : (cpu_id += 1) {
         // Allocate regular stack
         allocatePerCpuStack(cpu_id) catch |err| {
-            serial.println("[STACK] Failed to allocate stack for CPU {}: {s}", .{ cpu_id, @errorName(err) });
+            serial.println("[STACK] Failed to allocate stack for CPU {}: {s}", .{ cpu_id, error_utils.errorToString(err) });
             continue;
         };
 
@@ -1351,7 +1352,7 @@ pub fn initializeAdvancedFeatures() !void {
     // Initialize hardware CET shadow stack if available
     if (cpuid.hasCET_SS()) {
         initializeHardwareShadowStack() catch |err| {
-            serial.println("[STACK] Hardware shadow stack init failed: {s}", .{@errorName(err)});
+            serial.println("[STACK] Hardware shadow stack init failed: {s}", .{error_utils.errorToString(err)});
         };
     }
 
@@ -1364,7 +1365,7 @@ pub fn initializeAdvancedFeatures() !void {
     if (shadow_stack_dynamic != null or features.hardware_shadow_stack) {
         features.shadow_stack_write_protected = true;
         protectShadowStackPages() catch |err| {
-            serial.println("[STACK] Shadow stack write protection failed: {s}", .{@errorName(err)});
+            serial.println("[STACK] Shadow stack write protection failed: {s}", .{error_utils.errorToString(err)});
             features.shadow_stack_write_protected = false;
         };
     }

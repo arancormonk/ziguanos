@@ -45,9 +45,9 @@ const FileInfo = extern struct {
     file_name: [512]u16,
 };
 
-/// Enhanced kernel path validation with comprehensive security checks
-/// This function validates kernel paths to prevent directory traversal,
-/// invalid characters, and other security vulnerabilities
+// Enhanced kernel path validation with comprehensive security checks
+// This function validates kernel paths to prevent directory traversal,
+// invalid characters, and other security vulnerabilities
 fn validateKernelPath(kernel_path: []const u8) !void {
     // Length validation
     if (kernel_path.len == 0) {
@@ -139,7 +139,7 @@ fn validateKernelPath(kernel_path: []const u8) !void {
     }
 }
 
-/// Load kernel from EFI System Partition
+// Load kernel from EFI System Partition
 pub fn loadKernelInternal(
     handle: uefi.Handle,
     boot_services: *uefi.tables.BootServices,
@@ -479,7 +479,7 @@ const ElfLoadResult = struct {
     kaslr_offset: u64,
 };
 
-/// Validate and load ELF kernel
+// Validate and load ELF kernel
 fn validateAndLoadElf(
     kernel_buffer: [*]u8,
     kernel_size: u64,
@@ -622,7 +622,7 @@ const SegmentLoadResult = struct {
     kaslr_offset: u64,
 };
 
-/// Load ELF segments into memory
+// Load ELF segments into memory
 fn loadElfSegments(
     kernel_buffer: [*]u8,
     kernel_size: u64,
@@ -870,7 +870,7 @@ fn loadElfSegments(
     };
 }
 
-/// Load a single ELF segment
+// Load a single ELF segment
 fn loadSingleSegment(
     kernel_buffer: [*]u8,
     ph: *const kernel_types.Elf64ProgramHeader,

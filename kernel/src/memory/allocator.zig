@@ -1,12 +1,12 @@
 // Copyright 2025 arancormonk
 // SPDX-License-Identifier: MIT
 
-//! Kernel allocator interface for heap allocation
+// Kernel allocator interface for heap allocation
 
 const std = @import("std");
 const heap = @import("heap.zig");
 
-/// Kernel allocator using heap allocation
+// Kernel allocator using heap allocation
 pub const kernel_allocator = std.mem.Allocator{
     .ptr = undefined,
     .vtable = &kernel_allocator_vtable,

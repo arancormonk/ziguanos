@@ -6,6 +6,7 @@
 const std = @import("std");
 const serial = @import("../../drivers/serial.zig");
 const stack_security = @import("../stack_security.zig");
+const error_utils = @import("../../lib/error_utils.zig");
 
 // Test basic canary protection using new CanaryGuard
 fn testBasicCanary() !void {
@@ -64,22 +65,22 @@ fn outerFunction() !void {
 pub fn runAllTests() void {
     // Test 1: Basic CanaryGuard
     testBasicCanary() catch |err| {
-        serial.println("[CANARY TEST] Basic CanaryGuard test failed: {s}", .{@errorName(err)});
+        serial.println("[CANARY TEST] Basic CanaryGuard test failed: {s}", .{error_utils.errorToString(err)});
     };
 
     // Test 2: CanaryGuard with stack usage
     testCanaryWithStackUsage() catch |err| {
-        serial.println("[CANARY TEST] Stack usage test failed: {s}", .{@errorName(err)});
+        serial.println("[CANARY TEST] Stack usage test failed: {s}", .{error_utils.errorToString(err)});
     };
 
     // Test 3: Nested CanaryGuards
     outerFunction() catch |err| {
-        serial.println("[CANARY TEST] Nested function test failed: {s}", .{@errorName(err)});
+        serial.println("[CANARY TEST] Nested function test failed: {s}", .{error_utils.errorToString(err)});
     };
 
     // Test 4: Shadow stack integrity
     testShadowStackIntegrity() catch |err| {
-        serial.println("[CANARY TEST] Shadow stack integrity test failed: {s}", .{@errorName(err)});
+        serial.println("[CANARY TEST] Shadow stack integrity test failed: {s}", .{error_utils.errorToString(err)});
     };
 }
 

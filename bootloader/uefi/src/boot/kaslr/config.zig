@@ -37,7 +37,7 @@ pub const kaslr_guid align(8) = uefi.Guid{
     .node = [_]u8{ 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC },
 };
 
-/// RNG retry configuration structure
+// RNG retry configuration structure
 pub const RngRetryConfig = struct {
     rdrand_max_retries: u32,
     rdseed_max_retries: u32,
@@ -53,12 +53,12 @@ var rng_retry_config: RngRetryConfig = .{
     .rdseed_max_retries = RngRetryConfig.DEFAULT_RDSEED_RETRIES,
 };
 
-/// Get the current RNG retry configuration
+// Get the current RNG retry configuration
 pub fn getRngRetryConfig() RngRetryConfig {
     return rng_retry_config;
 }
 
-/// Load RNG retry configuration from UEFI variable cache
+// Load RNG retry configuration from UEFI variable cache
 pub fn loadRngRetryConfig(runtime_services: *uefi.tables.RuntimeServices) void {
     // Initialize cache if not already done
     if (!variable_cache.isInitialized()) {

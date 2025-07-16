@@ -11,7 +11,7 @@ const serial = @import("../drivers/serial.zig");
 const policy = @import("policy.zig");
 const builtin = @import("builtin");
 
-/// Debug levels for controlling output verbosity
+// Debug levels for controlling output verbosity
 pub const DebugLevel = enum(u8) {
     None = 0, // No debug output at all
     Critical = 1, // Only critical security messages
@@ -30,7 +30,7 @@ pub const DebugLevel = enum(u8) {
     }
 };
 
-/// Sensitive data types that need sanitization
+// Sensitive data types that need sanitization
 const SensitiveDataType = enum {
     KernelAddress,
     KASLROffset,
@@ -41,7 +41,7 @@ const SensitiveDataType = enum {
     None,
 };
 
-/// Debug output sanitizer configuration
+// Debug output sanitizer configuration
 pub const DebugSanitizer = struct {
     debug_level: DebugLevel,
     sanitize_addresses: bool,
@@ -80,12 +80,12 @@ pub const DebugSanitizer = struct {
         };
     }
 
-    /// Check if output is allowed for given level
+    // Check if output is allowed for given level
     pub fn isAllowed(self: *const DebugSanitizer, level: DebugLevel) bool {
         return @intFromEnum(level) <= @intFromEnum(self.debug_level);
     }
 
-    /// Classify data type for sanitization
+    // Classify data type for sanitization
     fn classifyData(value: u64) SensitiveDataType {
         // Kernel addresses (typically loaded at 0x200000 or with KASLR offset)
         if (value >= 0x100000 and value < 0x10000000) {
@@ -110,7 +110,7 @@ pub const DebugSanitizer = struct {
         return .None;
     }
 
-    /// Hash a value for sanitization
+    // Hash a value for sanitization
     fn hashValue(self: *const DebugSanitizer, value: u64) u64 {
         var hash = value ^ self.hash_key;
         hash = (hash ^ (hash >> 30)) *% 0xBF58476D1CE4E5B9;
@@ -119,7 +119,7 @@ pub const DebugSanitizer = struct {
         return hash & 0xFFFF; // Return only lower 16 bits
     }
 
-    /// Sanitize a potentially sensitive value
+    // Sanitize a potentially sensitive value
     pub fn sanitizeValue(self: *const DebugSanitizer, value: u64, data_type: SensitiveDataType) u64 {
         if (!self.sanitize_addresses) {
             return value;
@@ -134,7 +134,7 @@ pub const DebugSanitizer = struct {
         };
     }
 
-    /// Format an address for safe output
+    // Format an address for safe output
     pub fn formatAddress(self: *const DebugSanitizer, writer: anytype, addr: u64) !void {
         const data_type = classifyData(addr);
 
@@ -146,7 +146,7 @@ pub const DebugSanitizer = struct {
         }
     }
 
-    /// Sanitize a format string and its arguments
+    // Sanitize a format string and its arguments
     pub fn sanitizeFormat(self: *const DebugSanitizer, comptime fmt: []const u8, args: anytype) void {
         // For now, we'll implement specific print functions instead
         // of trying to parse and sanitize arbitrary format strings
@@ -156,24 +156,24 @@ pub const DebugSanitizer = struct {
     }
 };
 
-/// Global debug sanitizer instance
+// Global debug sanitizer instance
 pub var debug_sanitizer: DebugSanitizer = undefined;
 var initialized = false;
 
-/// Initialize the debug sanitizer
+// Initialize the debug sanitizer
 pub fn init() void {
     debug_sanitizer = DebugSanitizer.init();
     initialized = true;
 }
 
-/// Ensure sanitizer is initialized
+// Ensure sanitizer is initialized
 fn ensureInitialized() void {
     if (!initialized) {
         init();
     }
 }
 
-/// Secure debug print functions
+// Secure debug print functions
 pub fn print(level: DebugLevel, comptime fmt: []const u8, args: anytype) void {
     ensureInitialized();
 
@@ -195,7 +195,7 @@ pub fn println(level: DebugLevel, comptime fmt: []const u8, args: anytype) void 
     serial.print("\r\n", .{}) catch {};
 }
 
-/// Specialized print functions for sensitive data
+// Specialized print functions for sensitive data
 pub fn printKernelLoad(physical_addr: u64, virtual_addr: u64, size: u64) void {
     ensureInitialized();
 
@@ -316,7 +316,7 @@ pub fn printStackTrace(rip: u64, rsp: u64, rbp: u64) void {
     }
 }
 
-/// Test function to verify sanitization
+// Test function to verify sanitization
 pub fn runSelfTest() void {
     init();
 

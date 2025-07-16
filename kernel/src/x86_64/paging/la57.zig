@@ -4,6 +4,7 @@
 const std = @import("std");
 const serial = @import("../../drivers/serial.zig");
 const cpuid = @import("../cpuid.zig");
+const error_utils = @import("../../lib/error_utils.zig");
 
 // CR4 bit for LA57
 const CR4_LA57: u64 = 1 << 12;
@@ -112,7 +113,7 @@ pub fn testLA57() void {
     // Try to enable LA57
     enable() catch |err| {
         serial.print("    Failed to enable LA57: ", .{});
-        serial.println("{s}", .{@errorName(err)});
+        serial.println("{s}", .{error_utils.errorToString(err)});
         return;
     };
 

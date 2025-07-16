@@ -21,12 +21,12 @@ const error_utils = @import("../lib/error_utils.zig");
 // Store boot info for ACPI initialization
 var saved_boot_info: ?*const uefi_boot.UEFIBootInfo = null;
 
-/// Set boot information for hardware initialization
+// Set boot information for hardware initialization
 pub fn setBootInfo(boot_info: *const uefi_boot.UEFIBootInfo) void {
     saved_boot_info = boot_info;
 }
 
-/// Initialize hardware components
+// Initialize hardware components
 pub fn init() void {
     // Initialize per-CPU infrastructure for BSP
     per_cpu.initBsp() catch |err| {
@@ -170,7 +170,7 @@ pub fn init() void {
     }
 }
 
-/// Prepare for interrupt enabling
+// Prepare for interrupt enabling
 pub fn prepareForInterrupts() void {
     // Mask all interrupts except timer before enabling
     serial.println("[KERNEL] Masking spurious interrupts...", .{});
@@ -182,14 +182,14 @@ pub fn prepareForInterrupts() void {
     }
 }
 
-/// Enable interrupts
+// Enable interrupts
 pub fn enableInterrupts() void {
     serial.println("[KERNEL] Enabling interrupts...", .{});
     serial.flush(); // Flush before enabling interrupts to avoid race conditions
     asm volatile ("sti");
 }
 
-/// Print hardware statistics
+// Print hardware statistics
 pub fn printStatistics() void {
     // Print interrupt statistics
     interrupts.printStatistics();

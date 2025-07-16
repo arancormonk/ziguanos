@@ -9,6 +9,7 @@ const pmm = @import("../memory/pmm.zig");
 const vmm = @import("../memory/vmm.zig");
 const stack_security = @import("../x86_64/stack_security.zig");
 const secure_print = @import("../lib/secure_print.zig");
+const error_utils = @import("../lib/error_utils.zig");
 
 // UEFI boot info structure
 const UEFIBootInfo = uefi_boot.UEFIBootInfo;
@@ -16,7 +17,7 @@ const UEFIBootInfo = uefi_boot.UEFIBootInfo;
 // Kernel stack configuration
 const KERNEL_STACK_SIZE = 32; // pages (128KB)
 
-/// Initialize memory subsystems phase 1 - up to stack allocation
+// Initialize memory subsystems phase 1 - up to stack allocation
 pub fn initPhase1(boot_info: *const UEFIBootInfo) !struct { phys: u64, top: u64 } {
     // Initialize paging with proper permissions
     paging.init(boot_info);
@@ -51,8 +52,8 @@ pub fn initPhase1(boot_info: *const UEFIBootInfo) !struct { phys: u64, top: u64 
     return .{ .phys = kernel_stack_phys, .top = new_stack_top };
 }
 
-/// Initialize memory subsystems phase 2 - after stack switch
-pub fn initPhase2(kernel_stack_phys: u64, new_stack_top: u64, boot_info: *const UEFIBootInfo) !void {
+// Initialize memory subsystems phase 2 - after stack switch
+pub fn initPhase2(kernel_stack_phys: u64, new_stack_top: u64, _: *const UEFIBootInfo) !void {
     serial.println("[KERNEL] Successfully switched to new kernel stack", .{});
     serial.flush();
 
@@ -61,17 +62,13 @@ pub fn initPhase2(kernel_stack_phys: u64, new_stack_top: u64, boot_info: *const 
     stack_security.checkStackDepth();
     serial.flush(); // Ensure stack security update is visible
 
-    // Phase 2: Extend memory mapping now that PMM is available
-    serial.println("[KERNEL] Extending memory mapping (Phase 2)...", .{});
-    paging.extendMemoryMapping(boot_info) catch |err| {
-        serial.println("[KERNEL] WARNING: Failed to extend memory mapping: {s}", .{@errorName(err)});
-        serial.println("[KERNEL] System will continue with limited memory mapping", .{});
-    };
+    // Phase 2 removed - bootloader now allocates all page tables
+    serial.println("[KERNEL] All memory already mapped by bootloader", .{});
     serial.flush();
 
     // Initialize virtual memory manager
     vmm.init() catch |err| {
-        serial.println("[KERNEL] VMM init failed: {s}", .{@errorName(err)});
+        serial.println("[KERNEL] VMM init failed: {s}", .{error_utils.errorToString(err)});
         serial.flush();
         return err;
     };
@@ -80,7 +77,7 @@ pub fn initPhase2(kernel_stack_phys: u64, new_stack_top: u64, boot_info: *const 
     serial.flush();
 }
 
-/// Test memory protection features
+// Test memory protection features
 pub fn testProtection() void {
     serial.println("[KERNEL] Testing memory protection features...", .{});
     pmm.testMemoryProtection();
@@ -88,13 +85,13 @@ pub fn testProtection() void {
     serial.flush(); // Ensure memory protection test results are visible
 }
 
-/// Test advanced paging features
+// Test advanced paging features
 pub fn testAdvancedFeatures() void {
     // Run all paging tests
     paging.testAllPagingFeatures();
 }
 
-/// Report memory usage statistics
+// Report memory usage statistics
 pub fn reportStatistics() void {
     pmm.reportSecurityStats();
     pmm.reportTaggedMemoryUsage();

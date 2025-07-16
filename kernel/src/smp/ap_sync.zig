@@ -8,20 +8,20 @@
 const std = @import("std");
 const spinlock = @import("../lib/spinlock.zig");
 
-/// Global BSP protection lock
-/// Used to ensure BSP doesn't experience faults during SIPI operations
+// Global BSP protection lock
+// Used to ensure BSP doesn't experience faults during SIPI operations
 pub var bsp_protection_lock = spinlock.SpinLock{};
 
-/// AP startup synchronization barrier
-/// Ensures APs wait before accessing shared resources
+// AP startup synchronization barrier
+// Ensures APs wait before accessing shared resources
 pub const ApBarrier = struct {
-    /// Number of APs that need to reach the barrier
+    // Number of APs that need to reach the barrier
     expected_count: u32,
-    /// Current count of APs at the barrier
+    // Current count of APs at the barrier
     current_count: u32,
-    /// Lock protecting the barrier state
+    // Lock protecting the barrier state
     lock: spinlock.SpinLock,
-    /// Signal to proceed past the barrier
+    // Signal to proceed past the barrier
     proceed: bool,
 
     pub fn init(expected_aps: u32) ApBarrier {
@@ -33,7 +33,7 @@ pub const ApBarrier = struct {
         };
     }
 
-    /// Wait at the barrier until all APs arrive or timeout
+    // Wait at the barrier until all APs arrive or timeout
     pub fn wait(self: *ApBarrier, timeout_cycles: u64) bool {
         // Increment count atomically
         {
@@ -61,14 +61,14 @@ pub const ApBarrier = struct {
         return false; // Timeout
     }
 
-    /// Signal all waiting APs to proceed
+    // Signal all waiting APs to proceed
     pub fn release(self: *ApBarrier) void {
         const flags = self.lock.acquire();
         defer self.lock.release(flags);
         self.proceed = true;
     }
 
-    /// Reset the barrier for reuse
+    // Reset the barrier for reuse
     pub fn reset(self: *ApBarrier) void {
         const flags = self.lock.acquire();
         defer self.lock.release(flags);
@@ -77,29 +77,29 @@ pub const ApBarrier = struct {
     }
 };
 
-/// Memory barrier to ensure all memory operations are visible
+// Memory barrier to ensure all memory operations are visible
 pub inline fn memoryBarrier() void {
     asm volatile ("mfence" ::: "memory");
 }
 
-/// Read barrier to ensure all reads complete before subsequent operations
+// Read barrier to ensure all reads complete before subsequent operations
 pub inline fn readBarrier() void {
     asm volatile ("lfence" ::: "memory");
 }
 
-/// Write barrier to ensure all writes complete before subsequent operations
+// Write barrier to ensure all writes complete before subsequent operations
 pub inline fn writeBarrier() void {
     asm volatile ("sfence" ::: "memory");
 }
 
-/// Full serializing barrier (stronger than memory barrier)
+// Full serializing barrier (stronger than memory barrier)
 pub inline fn serializingBarrier() void {
     // CPUID is a serializing instruction
     asm volatile ("cpuid" ::: "eax", "ebx", "ecx", "edx", "memory");
 }
 
-/// Delay function for AP startup synchronization
-/// Uses PAUSE instruction to reduce power consumption and bus contention
+// Delay function for AP startup synchronization
+// Uses PAUSE instruction to reduce power consumption and bus contention
 pub fn apStartupDelay(iterations: u32) void {
     var i: u32 = 0;
     while (i < iterations) : (i += 1) {
@@ -107,8 +107,8 @@ pub fn apStartupDelay(iterations: u32) void {
     }
 }
 
-/// Protected SIPI operation wrapper
-/// Ensures BSP stability during SIPI transmission
+// Protected SIPI operation wrapper
+// Ensures BSP stability during SIPI transmission
 pub fn protectedSipiOperation(comptime T: type, operation: fn () T) T {
     // Ensure all memory operations are complete
     memoryBarrier();

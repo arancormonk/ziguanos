@@ -23,7 +23,7 @@ pub const KASLR_ALIGNMENT_FINE: u64 = 0x10000; // 64KB for high entropy
 pub const KASLR_ALIGNMENT_NORMAL: u64 = 0x200000; // 2MB for TLB efficiency (default)
 pub const KASLR_ALIGNMENT_COARSE: u64 = 0x1000000; // 16MB for huge TLB
 
-/// Helper function to calculate entropy bits from number of positions
+// Helper function to calculate entropy bits from number of positions
 pub fn calculateEntropyBits(num_positions: u64) u32 {
     if (num_positions <= 1) return 0;
 
@@ -35,7 +35,7 @@ pub fn calculateEntropyBits(num_positions: u64) u32 {
     return bits;
 }
 
-/// Select KASLR alignment based on available memory - Enhanced for higher entropy
+// Select KASLR alignment based on available memory - Enhanced for higher entropy
 pub fn selectKASLRAlignment(available_range: u64) u64 {
     // Check for user preference via UEFI variable
     const runtime_services = @import("../../utils/uefi_globals.zig").system_table.runtime_services;
@@ -123,7 +123,7 @@ pub fn selectKASLRAlignment(available_range: u64) u64 {
     }
 }
 
-/// Generate per-segment randomization offsets for section-level KASLR
+// Generate per-segment randomization offsets for section-level KASLR
 pub fn generateSegmentOffsets(num_segments: usize, available_range: u64, hardware_rng: bool) !kernel_types.SegmentKASLR {
     var segment_kaslr = kernel_types.SegmentKASLR{
         .base_offset = 0,
@@ -206,7 +206,7 @@ pub fn generateSegmentOffsets(num_segments: usize, available_range: u64, hardwar
     return segment_kaslr;
 }
 
-/// Check if KASLR enforcement is enabled (fail if KASLR cannot be applied)
+// Check if KASLR enforcement is enabled (fail if KASLR cannot be applied)
 pub fn isKASLREnforcementEnabled() bool {
     // Access runtime services through system table
     const runtime_services = @import("../../utils/uefi_globals.zig").system_table.runtime_services;
@@ -252,7 +252,7 @@ pub fn isKASLREnforcementEnabled() bool {
     return config.ENFORCE_KASLR_ON_FAILURE;
 }
 
-/// Check if KASLR is enabled at runtime
+// Check if KASLR is enabled at runtime
 pub fn isKASLREnabled(boot_services: *uefi.tables.BootServices) bool {
     _ = boot_services; // Will be used for command line parsing in future
 
@@ -289,7 +289,7 @@ pub fn isKASLREnabled(boot_services: *uefi.tables.BootServices) bool {
     return true;
 }
 
-/// Get safe memory range for KASLR from UEFI memory map
+// Get safe memory range for KASLR from UEFI memory map
 pub fn getSafeKASLRRange(boot_services: *uefi.tables.BootServices) struct { min: u64, max: u64 } {
     var memory_map_size: usize = 0;
     var map_key: usize = undefined;
@@ -419,7 +419,7 @@ pub fn getSafeKASLRRange(boot_services: *uefi.tables.BootServices) struct { min:
     return .{ .min = best_start, .max = best_end };
 }
 
-/// Get random offset for KASLR
+// Get random offset for KASLR
 pub fn getRandomOffset(boot_services: *uefi.tables.BootServices) !u64 {
     // Check if KASLR is enabled at runtime
     if (!isKASLREnabled(boot_services)) {

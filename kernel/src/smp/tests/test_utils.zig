@@ -5,7 +5,7 @@ const std = @import("std");
 const spinlock = @import("../../lib/spinlock.zig");
 const serial = @import("../../drivers/serial.zig");
 
-/// Generic barrier for test synchronization
+// Generic barrier for test synchronization
 pub const Barrier = struct {
     count: u32,
     generation: u32,
@@ -45,7 +45,7 @@ pub const Barrier = struct {
     }
 };
 
-/// Test function wrapper for remote execution
+// Test function wrapper for remote execution
 pub const TestFunction = struct {
     func: *const fn (*anyopaque) void,
     data: *anyopaque,
@@ -62,7 +62,7 @@ pub const TestFunction = struct {
     }
 };
 
-/// Per-CPU test context
+// Per-CPU test context
 pub const TestContext = struct {
     cpu_id: u32,
     barrier: *Barrier,

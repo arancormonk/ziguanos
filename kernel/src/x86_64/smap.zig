@@ -8,6 +8,7 @@ const std = @import("std");
 const serial = @import("../drivers/serial.zig");
 const cpuid = @import("cpuid.zig");
 const stack_security = @import("stack_security.zig");
+const error_utils = @import("../lib/error_utils.zig");
 
 // SMAP violation statistics
 var smap_violations: std.atomic.Value(u64) = std.atomic.Value(u64).init(0);
@@ -339,7 +340,7 @@ pub fn testSMAP() void {
 
         serial.println("[SMAP] UserAccessGuard created successfully", .{});
     } else |err| {
-        serial.println("[SMAP] UserAccessGuard creation failed: {s}", .{@errorName(err)});
+        serial.println("[SMAP] UserAccessGuard creation failed: {s}", .{error_utils.errorToString(err)});
     }
 
     printStats();

@@ -12,6 +12,7 @@ const io_security = @import("io_security.zig");
 const serial = @import("../drivers/serial.zig");
 const stack_security = @import("stack_security.zig");
 const secure_print = @import("../lib/secure_print.zig");
+const error_utils = @import("../lib/error_utils.zig");
 
 // APIC register offsets
 const APIC_ID = 0x20;
@@ -473,7 +474,7 @@ pub fn init() !void {
 
     // Map the APIC with identity mapping
     paging.mapMMIORegion(apic_virtual_base, physical_base, paging.PAGE_SIZE_4K) catch |err| {
-        serial.print("[APIC] Failed to map MMIO region: {}\r\n", .{err});
+        serial.println("[APIC] Failed to map MMIO region: {s}", .{error_utils.errorToString(err)});
         return err;
     };
 

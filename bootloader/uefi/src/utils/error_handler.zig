@@ -6,7 +6,7 @@ const uefi = std.os.uefi;
 const uefi_globals = @import("uefi_globals.zig");
 const console = @import("console.zig");
 
-/// Error handler that returns to UEFI
+// Error handler that returns to UEFI
 pub fn uefiError(status: uefi.Status) noreturn {
     _ = status;
     // Can't use runtime services after ExitBootServices, so just hang
@@ -16,7 +16,7 @@ pub fn uefiError(status: uefi.Status) noreturn {
     }
 }
 
-/// Print an error to the console
+// Print an error to the console
 pub fn printError(err: anyerror) !void {
     const con_out = uefi_globals.system_table.con_out.?;
     const error_name = @errorName(err);
@@ -49,7 +49,7 @@ pub fn printError(err: anyerror) !void {
     _ = con_out.outputString(@ptrCast(&wide_buffer));
 }
 
-/// Print error message for kernel hash verification failures
+// Print error message for kernel hash verification failures
 pub fn printHashVerificationError(err: anyerror) void {
     if (err == error.HashMismatch) {
         console.println("\r\nKernel verification failed!");

@@ -1,14 +1,14 @@
 // Copyright 2025 arancormonk
 // SPDX-License-Identifier: MIT
 
-/// Memory allocation tracking and cleanup utilities
+// Memory allocation tracking and cleanup utilities
 const std = @import("std");
 const uefi = std.os.uefi;
 const serial = @import("../drivers/serial.zig");
 const kernel_types = @import("kernel_types.zig");
 const vmm = @import("vmm.zig");
 
-/// Structure to track allocated memory for cleanup
+// Structure to track allocated memory for cleanup
 pub const AllocatedMemory = struct {
     kernel_buffer: ?[*]align(4096) u8 = null,
     kernel_pages: usize = 0,
@@ -22,7 +22,7 @@ pub const AllocatedMemory = struct {
     contiguous_allocation: ?[*]align(4096) u8 = null,
     contiguous_pages: usize = 0,
 
-    /// Add a new allocation to track
+    // Add a new allocation to track
     pub fn add(self: *AllocatedMemory, addr: u64, pages: usize) !void {
         if (self.segment_count >= self.segments.len) {
             return error.TooManyAllocations;
@@ -39,7 +39,7 @@ pub const AllocatedMemory = struct {
     }
 };
 
-/// Clean up all allocated memory during kernel loading
+// Clean up all allocated memory during kernel loading
 pub fn cleanupAllocations(boot_services: *uefi.tables.BootServices, allocations: *AllocatedMemory) void {
     // In PIE mode, we can't free segments as they contain the actual kernel code!
     if (allocations.use_identity_mapping) {
@@ -81,12 +81,12 @@ pub fn cleanupAllocations(boot_services: *uefi.tables.BootServices, allocations:
     }
 }
 
-/// Calculate the number of pages needed for a given size
+// Calculate the number of pages needed for a given size
 pub fn calculatePages(size: usize) usize {
     return (size + 4095) / 4096;
 }
 
-/// Allocate memory with proper alignment and tracking
+// Allocate memory with proper alignment and tracking
 pub fn allocateMemory(boot_services: *uefi.tables.BootServices, allocations: *AllocatedMemory, size: usize, memory_type: uefi.tables.MemoryType) !*anyopaque {
     const pages = calculatePages(size);
 
@@ -112,7 +112,7 @@ pub fn allocateMemory(boot_services: *uefi.tables.BootServices, allocations: *Al
     return buffer;
 }
 
-/// Free a previously allocated memory block
+// Free a previously allocated memory block
 pub fn freeMemory(boot_services: *uefi.tables.BootServices, allocations: *AllocatedMemory, address: *anyopaque) void {
     const addr = @intFromPtr(address);
 
@@ -139,7 +139,7 @@ pub fn freeMemory(boot_services: *uefi.tables.BootServices, allocations: *Alloca
     serial.print("[MEMORY] Warning: Attempted to free untracked memory at 0x{X}\r\n", .{addr}) catch {};
 }
 
-/// Check if an address is within the allocated memory range
+// Check if an address is within the allocated memory range
 pub fn isAddressAllocated(allocations: *const AllocatedMemory, address: u64) bool {
     for (allocations.segments[0..allocations.segment_count]) |segment| {
         if (address >= segment.virtual_address and address < segment.virtual_address + segment.size) {
@@ -149,7 +149,7 @@ pub fn isAddressAllocated(allocations: *const AllocatedMemory, address: u64) boo
     return false;
 }
 
-/// Get memory statistics
+// Get memory statistics
 pub fn getMemoryStats(allocations: *const AllocatedMemory) struct {
     total_allocations: usize,
     total_size: usize,

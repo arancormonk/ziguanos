@@ -8,7 +8,7 @@ const boot_coordinator = @import("boot/coordinator.zig");
 const error_handler = @import("utils/error_handler.zig");
 const console = @import("utils/console.zig");
 
-/// Main entry point for UEFI application
+// Main entry point for UEFI application
 pub fn main() noreturn {
     // Initialize global UEFI state
     uefi_globals.init(uefi.system_table);

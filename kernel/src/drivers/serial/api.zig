@@ -15,7 +15,7 @@ const security_sanitizer = @import("security/sanitizer.zig");
 const security_policy = @import("security/policy.zig");
 const timing_security = @import("security/timing.zig");
 
-/// Initialization phases
+// Initialization phases
 pub const Phase = enum {
     uninitialized,
     early_boot,
@@ -24,7 +24,7 @@ pub const Phase = enum {
     fully_initialized,
 };
 
-/// Unified serial API
+// Unified serial API
 pub const SerialAPI = struct {
     phase: Phase,
     core_driver: ?*core.Driver,
@@ -48,7 +48,7 @@ pub const SerialAPI = struct {
         };
     }
 
-    /// Initialize early boot phase (minimal hardware access)
+    // Initialize early boot phase (minimal hardware access)
     pub fn initEarly(self: *SerialAPI) void {
         if (self.phase != .uninitialized) return;
 
@@ -57,7 +57,7 @@ pub const SerialAPI = struct {
         self.phase = .early_boot;
     }
 
-    /// Initialize core phase (basic driver with buffering)
+    // Initialize core phase (basic driver with buffering)
     pub fn initCore(self: *SerialAPI) void {
         if (self.phase != .early_boot) return;
 
@@ -66,7 +66,7 @@ pub const SerialAPI = struct {
         self.phase = .core_ready;
     }
 
-    /// Initialize advanced phase (advanced features)
+    // Initialize advanced phase (advanced features)
     pub fn initAdvanced(self: *SerialAPI, queue_mgr: *advanced_queue.QueueManager, stats: *advanced_stats.Statistics, formatter: *advanced_formatter.Formatter) void {
         if (self.phase != .core_ready) return;
 
@@ -81,7 +81,7 @@ pub const SerialAPI = struct {
         self.phase = .advanced_ready;
     }
 
-    /// Initialize security phase (full security features)
+    // Initialize security phase (full security features)
     pub fn initSecurity(self: *SerialAPI, sanitizer: *security_sanitizer.AddressSanitizer, policy: *security_policy.SecurityPolicy, timing: *timing_security.TimingSecurity) void {
         if (self.phase != .advanced_ready) return;
 
@@ -96,7 +96,7 @@ pub const SerialAPI = struct {
         self.phase = .fully_initialized;
     }
 
-    /// Print with automatic fallback based on current phase
+    // Print with automatic fallback based on current phase
     pub fn print(self: *SerialAPI, comptime fmt: []const u8, args: anytype) void {
         switch (self.phase) {
             .uninitialized => return,
@@ -107,12 +107,12 @@ pub const SerialAPI = struct {
         }
     }
 
-    /// Print with newline
+    // Print with newline
     pub fn println(self: *SerialAPI, comptime fmt: []const u8, args: anytype) void {
         self.print(fmt ++ "\r\n", args);
     }
 
-    /// Print with security level checking
+    // Print with security level checking
     pub fn printWithLevel(self: *SerialAPI, level: security_policy.MessageLevel, comptime fmt: []const u8, args: anytype) void {
         // Check security policy if available
         if (self.security_policy) |policy| {
@@ -122,7 +122,7 @@ pub const SerialAPI = struct {
         self.print(fmt, args);
     }
 
-    /// Direct write functions for emergency use
+    // Direct write functions for emergency use
     pub fn directWrite(self: *SerialAPI, byte: u8) void {
         switch (self.phase) {
             .uninitialized => return,
@@ -151,7 +151,7 @@ pub const SerialAPI = struct {
         }
     }
 
-    /// Flush any buffered output
+    // Flush any buffered output
     pub fn flush(self: *SerialAPI) void {
         switch (self.phase) {
             .uninitialized, .early_boot => return, // No buffering
@@ -185,7 +185,7 @@ pub const SerialAPI = struct {
         }
     }
 
-    /// Format and print an address (with sanitization if available)
+    // Format and print an address (with sanitization if available)
     pub fn printAddress(self: *SerialAPI, name: []const u8, addr: u64) void {
         if (self.security_sanitizer) |sanitizer| {
             var buffer: [128]u8 = undefined;
@@ -202,7 +202,7 @@ pub const SerialAPI = struct {
         }
     }
 
-    /// Print statistics if available
+    // Print statistics if available
     pub fn printStats(self: *SerialAPI) void {
         if (self.advanced_stats) |stats| {
             var buffer: [2048]u8 = undefined;
@@ -216,7 +216,7 @@ pub const SerialAPI = struct {
         }
     }
 
-    /// Self-test function
+    // Self-test function
     pub fn selfTest(self: *SerialAPI) bool {
         switch (self.phase) {
             .uninitialized => return false,
@@ -360,11 +360,11 @@ pub const SerialAPI = struct {
     }
 };
 
-/// Global API instance
+// Global API instance
 var global_api: SerialAPI = undefined;
 var api_initialized: bool = false;
 
-/// Get the global API instance
+// Get the global API instance
 pub fn getGlobal() *SerialAPI {
     if (!api_initialized) {
         global_api = SerialAPI.init();

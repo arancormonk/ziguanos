@@ -1,7 +1,7 @@
 // Copyright 2025 arancormonk
 // SPDX-License-Identifier: MIT
 
-/// Cryptographic primitives and entropy mixing utilities
+// Cryptographic primitives and entropy mixing utilities
 const std = @import("std");
 const uefi = std.os.uefi;
 const serial = @import("../../drivers/serial.zig");
@@ -13,7 +13,7 @@ const rng = @import("../../boot/rng.zig");
 // Global boot entropy data
 var boot_entropy_data = kernel_types.BootEntropyData{};
 
-/// Rotate left helper function specifically for u64
+// Rotate left helper function specifically for u64
 pub fn rotl64(value: u64, shift: u6) u64 {
     return (value << shift) | (value >> @as(u6, @intCast(64 - @as(u7, shift))));
 }
@@ -28,8 +28,8 @@ pub const DrbgState = struct {
     const MAX_RESEED_COUNT = 1024; // Conservative limit for bootloader use
 };
 
-/// Simple block cipher for DRBG (AES-like but simplified for bootloader)
-/// This provides adequate security for KASLR entropy mixing
+// Simple block cipher for DRBG (AES-like but simplified for bootloader)
+// This provides adequate security for KASLR entropy mixing
 pub fn blockCipher(key: u128, input: u128) u128 {
     // Constants from AES S-box for non-linearity
     const sbox = [16]u8{ 0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76 };
@@ -64,14 +64,14 @@ pub fn blockCipher(key: u128, input: u128) u128 {
     return state ^ round_key;
 }
 
-/// Simple key schedule for block cipher
+// Simple key schedule for block cipher
 pub fn blockCipherKeySchedule(key: u128, round: u32) u128 {
     const round_constant = @as(u128, 0x8d01020408102040) ^ (@as(u128, round) << 96);
     const rotated = (key << 8) | (key >> 120);
     return rotated ^ round_constant;
 }
 
-/// CTR_DRBG Update function (NIST SP 800-90A)
+// CTR_DRBG Update function (NIST SP 800-90A)
 pub fn drbgUpdate(state: *DrbgState, provided_data: u128) void {
     var temp: u128 = 0;
 
@@ -85,7 +85,7 @@ pub fn drbgUpdate(state: *DrbgState, provided_data: u128) void {
     state.v = @as(u128, @truncate(temp >> 64)) | (@as(u128, @truncate(temp)) << 64);
 }
 
-/// CTR_DRBG Instantiate function
+// CTR_DRBG Instantiate function
 pub fn drbgInstantiate(entropy: u128, nonce: u64) DrbgState {
     var state = DrbgState{
         .v = 0,
@@ -102,7 +102,7 @@ pub fn drbgInstantiate(entropy: u128, nonce: u64) DrbgState {
     return state;
 }
 
-/// CTR_DRBG Generate function
+// CTR_DRBG Generate function
 pub fn drbgGenerate(state: *DrbgState, num_bytes: usize) ?u64 {
     // Check reseed counter
     if (state.reseed_counter > DrbgState.MAX_RESEED_COUNT) {
@@ -126,8 +126,8 @@ pub fn drbgGenerate(state: *DrbgState, num_bytes: usize) ?u64 {
     return output;
 }
 
-/// SipHash-2-4 for entropy extraction (stronger than 1-2)
-/// Used as entropy extraction function before DRBG
+// SipHash-2-4 for entropy extraction (stronger than 1-2)
+// Used as entropy extraction function before DRBG
 pub fn sipHash24(key: u128, data: u64) u64 {
     const c0 = 0x736f6d6570736575;
     const c1 = 0x646f72616e646f6d;
@@ -193,8 +193,8 @@ pub fn sipHash24(key: u128, data: u64) u64 {
     return v0 ^ v1 ^ v2 ^ v3;
 }
 
-/// Test function for SipHash-2-4 validation
-/// Test vectors from SipHash reference implementation
+// Test function for SipHash-2-4 validation
+// Test vectors from SipHash reference implementation
 pub fn testSipHash24() bool {
     // First, let's verify with a simple known good case
     // Key: all zeros
@@ -231,14 +231,14 @@ pub fn testSipHash24() bool {
     return true;
 }
 
-/// Legacy mixer for compatibility (uses SipHash-2-4 internally)
+// Legacy mixer for compatibility (uses SipHash-2-4 internally)
 pub fn mixEntropy(value: u64) u64 {
     // Use a fixed key derived from the value itself for single-value mixing
     const key = @as(u128, value) | (@as(u128, ~value) << 64);
     return sipHash24(key, value);
 }
 
-/// Entropy quality assessment structure
+// Entropy quality assessment structure
 pub const EntropyQuality = struct {
     total_bits: u32,
     estimated_entropy: f32,
@@ -246,7 +246,7 @@ pub const EntropyQuality = struct {
     has_hardware_rng: bool,
 };
 
-/// Assess entropy quality (Intel-recommended)
+// Assess entropy quality (Intel-recommended)
 pub fn assessEntropyQuality(sources: []const u64, hardware_rng_used: bool) EntropyQuality {
     var quality = EntropyQuality{
         .total_bits = 0,
@@ -277,7 +277,7 @@ pub fn assessEntropyQuality(sources: []const u64, hardware_rng_used: bool) Entro
     return quality;
 }
 
-/// Collect boot entropy for kernel initialization
+// Collect boot entropy for kernel initialization
 pub fn collectBootEntropy(sources: []const u64, hardware_rng_used: bool) void {
     // If already collected, don't overwrite
     if (boot_entropy_data.collected) return;
@@ -323,7 +323,7 @@ pub fn collectBootEntropy(sources: []const u64, hardware_rng_used: bool) void {
     serial.print("[UEFI] Boot entropy collected: {} sources, quality score {}/100\r\n", .{ boot_entropy_data.sources_used, boot_entropy_data.quality }) catch {};
 }
 
-/// Mix multiple entropy sources using NIST SP 800-90A CTR_DRBG
+// Mix multiple entropy sources using NIST SP 800-90A CTR_DRBG
 pub fn mixEntropySources(sources: []const u64) !u64 {
     // Step 1: Extract entropy using SipHash-2-4 (entropy extraction)
     var entropy_pool: u128 = 0xdeadbeefcafebabe0011223344556677; // Initial state
@@ -361,7 +361,7 @@ pub fn mixEntropySources(sources: []const u64) !u64 {
     }
 }
 
-/// Get the collected boot entropy data
+// Get the collected boot entropy data
 pub fn getBootEntropyData() *const kernel_types.BootEntropyData {
     return &boot_entropy_data;
 }

@@ -24,8 +24,8 @@ extern fn _start() void;
 // Make it pub so other modules can access it
 pub var saved_boot_info: UEFIBootInfo = undefined;
 
-/// Kernel entry point called from assembly
-/// The assembly stub has already saved the boot info pointer
+// Kernel entry point called from assembly
+// The assembly stub has already saved the boot info pointer
 export fn _zig_start() callconv(.C) noreturn {
     // Disable interrupts immediately for security
     asm volatile ("cli");
@@ -88,7 +88,7 @@ export fn _zig_start() callconv(.C) noreturn {
     }
 }
 
-/// Get the saved boot info pointer
+// Get the saved boot info pointer
 pub fn getSavedBootInfo() *const UEFIBootInfo {
     return &saved_boot_info;
 }

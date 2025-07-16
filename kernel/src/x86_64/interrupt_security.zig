@@ -12,6 +12,7 @@ const pmm = @import("../memory/pmm.zig");
 const speculation = @import("speculation.zig");
 const stack_security = @import("stack_security.zig");
 const secure_print = @import("../lib/secure_print.zig");
+const error_utils = @import("../lib/error_utils.zig");
 
 // IST (Interrupt Stack Table) configuration
 pub const IST = struct {
@@ -359,7 +360,7 @@ pub fn handleSecureException(context: *InterruptContext) !void {
 
     // Validate the transition
     validatePrivilegeTransition(context) catch |err| {
-        serial.println("[INT_SEC] Privilege validation failed: {s}", .{@errorName(err)});
+        serial.println("[INT_SEC] Privilege validation failed: {s}", .{error_utils.errorToString(err)});
         // Continue with limited handling
     };
 
@@ -497,7 +498,7 @@ pub fn printStatistics() void {
 }
 
 // Validate interrupt context integrity with enhanced security checks
-/// Allocate IST stacks for a specific CPU (for SMP support)
+// Allocate IST stacks for a specific CPU (for SMP support)
 pub fn allocateIstStacks(cpu_id: u32) !void {
     var guard = stack_security.protect();
     defer guard.deinit();
@@ -529,7 +530,7 @@ pub fn allocateIstStacks(cpu_id: u32) !void {
     }
 }
 
-/// Get IST stacks for a specific CPU
+// Get IST stacks for a specific CPU
 pub fn getIstStacks(cpu_id: u32) [7][*]u8 {
     var result: [7][*]u8 = undefined;
 

@@ -7,7 +7,7 @@ const uefi_globals = @import("uefi_globals.zig");
 const serial = @import("../drivers/serial.zig");
 const kernel_loader = @import("../boot/kernel_loader.zig");
 
-/// Memory map information returned by UEFI
+// Memory map information returned by UEFI
 pub const MemoryMap = struct {
     descriptors: [*]uefi.tables.MemoryDescriptor,
     size: usize,
@@ -16,7 +16,7 @@ pub const MemoryMap = struct {
     descriptor_version: u32,
 };
 
-/// Get the current memory map from UEFI
+// Get the current memory map from UEFI
 pub fn getMemoryMap() !MemoryMap {
     var map_size: usize = 0;
     var map_key: usize = undefined;
@@ -63,7 +63,7 @@ pub fn getMemoryMap() !MemoryMap {
     };
 }
 
-/// Convert our MemoryMap to kernel_loader.MemoryMap format
+// Convert our MemoryMap to kernel_loader.MemoryMap format
 pub fn convertToKernelLoaderFormat(memory_map: MemoryMap) kernel_loader.MemoryMap {
     return kernel_loader.MemoryMap{
         .descriptors = memory_map.descriptors,

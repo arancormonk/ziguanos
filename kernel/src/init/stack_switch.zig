@@ -3,9 +3,9 @@
 
 const std = @import("std");
 
-/// Switch to a new stack and continue execution
-/// This function never returns - it jumps directly to the continuation
-/// Must be noinline to ensure proper stack frame handling
+// Switch to a new stack and continue execution
+// This function never returns - it jumps directly to the continuation
+// Must be noinline to ensure proper stack frame handling
 pub noinline fn switchStackAndContinue(
     new_stack_top: u64,
     continuation: *const fn () noreturn,

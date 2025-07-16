@@ -8,6 +8,7 @@ const interrupt_security = @import("interrupt_security.zig");
 const serial = @import("../drivers/serial.zig");
 const runtime_info = @import("../boot/runtime_info.zig");
 const spectre_v1 = @import("spectre_v1.zig");
+const error_utils = @import("../lib/error_utils.zig");
 
 // IDT entry structure (16 bytes)
 const IDTEntry = packed struct {
@@ -131,7 +132,7 @@ pub fn init() void {
 
     // Initialize interrupt security first
     interrupt_security.init() catch |err| {
-        serial.println("[IDT] Failed to initialize interrupt security: {s}", .{@errorName(err)});
+        serial.println("[IDT] Failed to initialize interrupt security: {s}", .{error_utils.errorToString(err)});
     };
 
     // Install exception handlers

@@ -19,6 +19,7 @@ const memory_tags = @import("pmm/memory_tags.zig");
 const memory_security = @import("pmm/memory_security.zig");
 const guard_pages = @import("pmm/guard_pages.zig");
 const statistics = @import("pmm/statistics.zig");
+const reserved_regions = @import("pmm/reserved_regions.zig");
 
 // Constants
 const PAGE_SIZE: u64 = 0x1000; // 4KB pages
@@ -45,6 +46,7 @@ var memory_bitmap: [MEMORY_BITMAP_SIZE]u64 align(8) = undefined;
 var total_pages: u64 = 0;
 var free_pages: u64 = 0;
 var reserved_pages: u64 = 0;
+var highest_page: u64 = 0; // Track highest physical page number for bounds checking
 
 // Security features
 var free_page_tracker = free_tracker.FreePageTracker{};
@@ -60,6 +62,9 @@ pub fn init(boot_info: *const uefi_boot.UEFIBootInfo) void {
     // Initialize without canary protection to avoid early init issues
 
     serial.print("[PMM] Initializing physical memory manager...\n", .{});
+
+    // Initialize reserved regions tracker first
+    reserved_regions.init(boot_info);
 
     // Debug boot info pointer and values
     secure_print.printPointer("[PMM] Boot info at", boot_info);
@@ -87,6 +92,11 @@ pub fn init(boot_info: *const uefi_boot.UEFIBootInfo) void {
     secure_print.printSize("[PMM] Memory map size", boot_info.memory_map_size);
     secure_print.printSize("[PMM] Descriptor size", boot_info.memory_map_descriptor_size);
 
+    // Debug: Print first bytes of memory map for comparison
+    const first_bytes = @as([*]const u64, @ptrCast(@alignCast(memory_map)));
+    serial.print("[PMM] Init - First 8 bytes of memory map: 0x{x:0>16}\n", .{first_bytes[0]});
+    serial.print("[PMM] Init - Second 8 bytes of memory map: 0x{x:0>16}\n", .{first_bytes[1]});
+
     if (boot_info.memory_map_descriptor_size == 0) {
         serial.print("[PMM] ERROR: Descriptor size is 0!\n", .{});
         return;
@@ -99,10 +109,17 @@ pub fn init(boot_info: *const uefi_boot.UEFIBootInfo) void {
     var offset: usize = 0;
     var total_system_pages: u64 = 0;
     var conventional_count: u64 = 0;
+    var max_physical_address: u64 = 0;
 
-    // First pass: Calculate total pages
+    // First pass: Calculate total pages and find highest physical address
     for (0..descriptor_count) |_| {
         const descriptor = @as(*const uefi_boot.UEFIMemoryDescriptor, @ptrCast(@alignCast(&memory_map[offset])));
+
+        // Track the highest physical address seen
+        const region_end = descriptor.physical_start + (descriptor.number_of_pages * PAGE_SIZE);
+        if (region_end > max_physical_address) {
+            max_physical_address = region_end;
+        }
 
         // Only count actual RAM (not MMIO, ACPI, etc.)
         switch (descriptor.type) {
@@ -120,17 +137,45 @@ pub fn init(boot_info: *const uefi_boot.UEFIBootInfo) void {
     // Set total_pages before any marking operations
     total_pages = total_system_pages;
 
+    // Calculate highest page number based on physical address space
+    highest_page = if (max_physical_address > 0) (max_physical_address + PAGE_SIZE - 1) / PAGE_SIZE else 0;
+
+    // Ensure our bitmap can handle the highest page
+    const max_bitmap_pages = MEMORY_BITMAP_SIZE * PAGES_PER_BITMAP;
+    if (highest_page > max_bitmap_pages) {
+        serial.print("[PMM] WARNING: Physical memory extends beyond bitmap capacity\n", .{});
+        serial.print("  Highest page: {}, max supported: {}\n", .{ highest_page, max_bitmap_pages });
+        highest_page = max_bitmap_pages;
+    }
+
     if (total_pages == 0) {
         serial.print("[PMM] ERROR: No memory found in UEFI memory map!\n", .{});
         serial.print("  Descriptor count was: {}\n", .{descriptor_count});
         // Set some minimal values to avoid divide by zero
         total_pages = 65536; // 256MB minimum
+        if (highest_page == 0) {
+            highest_page = 65536;
+        }
     }
+
+    serial.print("[PMM] Highest physical page: {} (address: 0x{x})\n", .{ highest_page, highest_page * PAGE_SIZE });
 
     // Second pass: Mark free pages
     offset = 0;
     for (0..descriptor_count) |_| {
         const descriptor = @as(*const uefi_boot.UEFIMemoryDescriptor, @ptrCast(@alignCast(&memory_map[offset])));
+
+        // Debug: Log memory regions around 8MB (0x800000)
+        if (descriptor.physical_start <= 0x900000 and
+            descriptor.physical_start + (descriptor.number_of_pages * PAGE_SIZE) >= 0x800000)
+        {
+            serial.println("[PMM] Memory region near 8MB: 0x{x:0>16} - 0x{x:0>16}, type: {s}, pages: {}", .{
+                descriptor.physical_start,
+                descriptor.physical_start + (descriptor.number_of_pages * PAGE_SIZE),
+                @tagName(descriptor.type),
+                descriptor.number_of_pages,
+            });
+        }
 
         // Only mark conventional memory as free
         if (descriptor.type == .Conventional) {
@@ -192,7 +237,7 @@ pub fn init(boot_info: *const uefi_boot.UEFIBootInfo) void {
     serial.print("[PMM] Reserved first page (0x0-0x1000) for AP debug area\n", .{});
 
     // Enable guard pages around critical regions
-    guard_pages.setupGuardPages(boot_info, markPagesAsUsed, &reserved_pages, total_pages);
+    guard_pages.setupGuardPages(boot_info, markPagesAsUsed, &reserved_pages, highest_page);
 
     // Print statistics
     const total_mb = (total_pages * PAGE_SIZE) / (1024 * 1024);
@@ -249,14 +294,14 @@ fn markPagesAsFreeInitial(start_page: u64, num_pages: u64) void {
 
 // Mark pages as free in bitmap with proper bounds checking
 fn markPagesAsFree(start_page: u64, num_pages: u64) void {
-    // Validate input parameters per Intel SDM recommendations
-    if (start_page >= total_pages) {
-        serial.print("[PMM] WARNING: Attempted to free page {} beyond total pages {}\n", .{ start_page, total_pages });
+    // Validate against highest page in physical address space, not total RAM pages
+    if (start_page >= highest_page) {
+        serial.print("[PMM] WARNING: Attempted to free page {} beyond highest page {}\n", .{ start_page, highest_page });
         return;
     }
 
     // Calculate safe number of pages to free, preventing overflow
-    const safe_num_pages = @min(num_pages, total_pages - start_page);
+    const safe_num_pages = @min(num_pages, highest_page - start_page);
 
     var page = start_page;
     var remaining = safe_num_pages;
@@ -306,14 +351,14 @@ fn markPagesAsUsedInitial(start_page: u64, num_pages: u64) void {
 
 // Mark pages as used in bitmap with proper bounds checking
 fn markPagesAsUsed(start_page: u64, num_pages: u64) void {
-    // Validate input parameters per Intel SDM recommendations
-    if (total_pages > 0 and start_page >= total_pages) {
-        serial.print("[PMM] WARNING: Attempted to mark page {} as used beyond total pages {}\n", .{ start_page, total_pages });
+    // Validate against highest page in physical address space
+    if (highest_page > 0 and start_page >= highest_page) {
+        serial.print("[PMM] WARNING: Attempted to mark page {} as used beyond highest page {}\n", .{ start_page, highest_page });
         return;
     }
 
     // Calculate safe number of pages to mark, preventing overflow
-    const safe_num_pages = if (total_pages > 0) @min(num_pages, total_pages - start_page) else num_pages;
+    const safe_num_pages = if (highest_page > 0) @min(num_pages, highest_page - start_page) else num_pages;
 
     var page = start_page;
     var remaining = safe_num_pages;
@@ -403,8 +448,8 @@ pub fn allocPages(num_pages: u64) ?u64 {
         for (0..PAGES_PER_BITMAP) |bit| {
             const page_num = safe_i * PAGES_PER_BITMAP + bit;
 
-            // Ensure we don't exceed total pages
-            if (page_num >= total_pages) {
+            // Ensure we don't exceed highest page
+            if (page_num >= highest_page) {
                 break;
             }
 
@@ -419,17 +464,25 @@ pub fn allocPages(num_pages: u64) ?u64 {
 
                 if (consecutive >= num_pages) {
                     // Validate the entire range before allocation
-                    if (start_page + num_pages > total_pages) {
+                    if (start_page + num_pages > highest_page) {
                         consecutive = 0;
                         continue;
                     }
 
-                    // Found enough contiguous pages
+                    const base_addr = start_page * PAGE_SIZE;
+                    const allocation_size = num_pages * PAGE_SIZE;
+
+                    // Check if this range overlaps with any reserved regions
+                    if (reserved_regions.isReserved(base_addr, allocation_size)) {
+                        // This range contains reserved memory, skip it
+                        consecutive = 0;
+                        continue;
+                    }
+
+                    // Found enough contiguous pages that are not reserved
                     markPagesAsUsed(start_page, num_pages);
                     free_pages -= num_pages;
                     stats.recordAllocation();
-
-                    const base_addr = start_page * PAGE_SIZE;
 
                     // Zero the allocated pages if enabled
                     if (memory_security.isZeroOnAllocEnabled()) {
@@ -469,16 +522,16 @@ pub fn freePages(addr: u64, num_pages: u64) void {
 
     const start_page = addr / PAGE_SIZE;
 
-    // Validate page range
-    if (start_page >= total_pages) {
-        serial.print("[PMM] ERROR: Attempted to free page {} beyond total pages {}\n", .{ start_page, total_pages });
+    // Validate page range against highest physical page
+    if (start_page >= highest_page) {
+        serial.print("[PMM] ERROR: Attempted to free page {} beyond highest page {}\n", .{ start_page, highest_page });
         stats.recordGuardPageViolation();
         return;
     }
 
-    if (start_page + num_pages > total_pages) {
-        serial.print("[PMM] WARNING: Free range extends beyond total pages, truncating\n", .{});
-        const safe_pages = total_pages - start_page;
+    if (start_page + num_pages > highest_page) {
+        serial.print("[PMM] WARNING: Free range extends beyond highest page, truncating\n", .{});
+        const safe_pages = highest_page - start_page;
         return freePages(addr, safe_pages);
     }
 
@@ -799,10 +852,153 @@ pub fn testMemoryProtection() void {
 
 // Create a guard page at a specific address (for paging subsystem)
 pub fn createGuardPage(addr: u64) !void {
-    try guard_pages.createGuardPage(addr, &memory_bitmap, total_pages, &free_pages);
+    try guard_pages.createGuardPage(addr, &memory_bitmap, highest_page, &free_pages);
 }
 
 // Add guard pages around a memory region
 pub fn addGuardPagesAroundRegion(start: u64, size: u64) !void {
     try guard_pages.addGuardPagesAroundRegion(start, size, createGuardPage);
+}
+
+// Mark boot services memory as reclaimable and actually free it
+pub fn markBootServicesExited(boot_info: *const uefi_boot.UEFIBootInfo) void {
+    reserved_regions.markBootServicesExited();
+
+    // Debug the boot info structure
+    serial.print("[PMM] markBootServicesExited called\n", .{});
+    secure_print.printPointer("[PMM] Boot info at", boot_info);
+    secure_print.printValue("[PMM] Memory map addr", boot_info.memory_map_addr);
+    secure_print.printSize("[PMM] Memory map size", boot_info.memory_map_size);
+    secure_print.printSize("[PMM] Descriptor size", boot_info.memory_map_descriptor_size);
+
+    // Now we need to actually free the boot services memory regions
+    if (boot_info.memory_map_addr == 0 or boot_info.memory_map_descriptor_size == 0) {
+        serial.print("[PMM] ERROR: Cannot reclaim boot services - invalid memory map\n", .{});
+        return;
+    }
+
+    const memory_map = @as([*]const u8, @ptrFromInt(boot_info.memory_map_addr));
+    const descriptor_count = boot_info.memory_map_size / boot_info.memory_map_descriptor_size;
+
+    serial.print("[PMM] Processing {} descriptors for boot services reclaim\n", .{descriptor_count});
+
+    // Debug: Check if memory map data looks valid
+    const first_bytes = @as([*]const u64, @ptrCast(@alignCast(memory_map)));
+    serial.print("[PMM] First 8 bytes of memory map: 0x{x:0>16}\n", .{first_bytes[0]});
+    serial.print("[PMM] Second 8 bytes of memory map: 0x{x:0>16}\n", .{first_bytes[1]});
+
+    // If we're seeing zeros, the memory map might have been corrupted
+    if (first_bytes[0] == 0 and first_bytes[1] == 0) {
+        serial.print("[PMM] ERROR: Memory map appears to be zeroed out!\n", .{});
+        serial.print("[PMM] This suggests the memory map was overwritten or freed.\n", .{});
+
+        // Try to provide a workaround by manually reclaiming known boot services regions
+        serial.print("[PMM] Attempting manual boot services reclaim based on reserved regions tracker...\n", .{});
+
+        // Get reclaimable regions from the reserved regions tracker
+        var regions_buffer: [256]reserved_regions.ReservedRegion = undefined;
+        const region_count = reserved_regions.getReclaimableRegions(&regions_buffer);
+
+        serial.print("[PMM] Found {} reclaimable regions in tracker\n", .{region_count});
+
+        var reclaimed_manual: u64 = 0;
+        for (regions_buffer[0..region_count]) |region| {
+            // Skip regions below 1MB
+            if (region.start >= PMM_RESERVED_BASE) {
+                const start_page = region.start / PAGE_SIZE;
+                const num_pages = (region.end - region.start) / PAGE_SIZE;
+
+                // Check if this would exceed highest_page
+                if (start_page >= highest_page) {
+                    serial.print("[PMM] WARNING: Manual reclaim region at 0x{x} exceeds highest_page\n", .{region.start});
+                    continue;
+                }
+
+                // Free the pages
+                markPagesAsFree(start_page, num_pages);
+                reclaimed_manual += num_pages;
+
+                // Log significant regions
+                if (num_pages > 256) {
+                    serial.print("[PMM] Manually reclaimed: 0x{x:0>16} - 0x{x:0>16} ({} pages)\n", .{ region.start, region.end, num_pages });
+                }
+            }
+        }
+
+        // Update free pages count
+        free_pages += reclaimed_manual;
+
+        const reclaimed_mb = (reclaimed_manual * PAGE_SIZE) / (1024 * 1024);
+        serial.print("[PMM] Manual boot services reclaim: {} MB ({} pages)\n", .{ reclaimed_mb, reclaimed_manual });
+        return;
+    }
+
+    var reclaimed_pages: u64 = 0;
+    var offset: usize = 0;
+
+    // Process memory map and free boot services regions
+    var boot_services_found: u64 = 0;
+    for (0..descriptor_count) |i| {
+        // Calculate descriptor pointer the same way as in init
+        const desc_ptr = &memory_map[offset];
+        const descriptor = @as(*const uefi_boot.UEFIMemoryDescriptor, @ptrCast(@alignCast(desc_ptr)));
+
+        // Debug: log first few descriptor types
+        if (i < 5) {
+            serial.print("[PMM] Descriptor {}: type={s}, start=0x{x}, pages={}\n", .{ i, @tagName(descriptor.type), descriptor.physical_start, descriptor.number_of_pages });
+        }
+
+        // Only reclaim boot services memory
+        if (descriptor.type == .BootServicesCode or descriptor.type == .BootServicesData) {
+            boot_services_found += 1;
+            const start_page = descriptor.physical_start / PAGE_SIZE;
+            const num_pages = descriptor.number_of_pages;
+
+            // Skip memory below 1MB (reserved for legacy)
+            if (descriptor.physical_start >= PMM_RESERVED_BASE) {
+                // Debug: check if this would exceed highest_page
+                if (start_page >= highest_page) {
+                    serial.print("[PMM] WARNING: Boot services region at 0x{x} (page {}) exceeds highest_page {}\n", .{ descriptor.physical_start, start_page, highest_page });
+                } else {
+                    // Mark these pages as free in the bitmap
+                    markPagesAsFree(start_page, num_pages);
+                    reclaimed_pages += num_pages;
+                }
+
+                // Debug output for significant regions
+                if (num_pages > 256) { // More than 1MB
+                    serial.print("[PMM] Reclaimed boot services region: 0x{x:0>16} - 0x{x:0>16} ({} pages)\n", .{
+                        descriptor.physical_start,
+                        descriptor.physical_start + (num_pages * PAGE_SIZE),
+                        num_pages,
+                    });
+                }
+            }
+        }
+
+        offset += boot_info.memory_map_descriptor_size;
+    }
+
+    // Update free pages count
+    free_pages += reclaimed_pages;
+
+    const reclaimed_mb = (reclaimed_pages * PAGE_SIZE) / (1024 * 1024);
+    serial.print("[PMM] Boot services regions found: {}\n", .{boot_services_found});
+    serial.print("[PMM] Boot services memory reclaimed: {} MB ({} pages)\n", .{
+        reclaimed_mb,
+        reclaimed_pages,
+    });
+
+    // Debug: print current highest_page
+    serial.print("[PMM] Current highest_page: {} (0x{x})\n", .{ highest_page, highest_page * PAGE_SIZE });
+}
+
+// Check if an address is in a reserved region
+pub fn isReserved(addr: u64, size: u64) bool {
+    return reserved_regions.isReserved(addr, size);
+}
+
+// Get detailed reserved regions information
+pub fn printReservedRegions() void {
+    reserved_regions.getTracker().printDetailedList();
 }

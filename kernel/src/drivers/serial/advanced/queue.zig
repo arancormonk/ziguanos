@@ -11,7 +11,7 @@ const QUEUE_SIZE = 4096;
 const RECEIVE_BUFFER_SIZE = 2048;
 const MAX_CPUS = 64;
 
-/// Enhanced per-CPU queue with better performance characteristics
+// Enhanced per-CPU queue with better performance characteristics
 pub const PerCpuQueue = struct {
     buffer: [QUEUE_SIZE]u8 = [_]u8{0} ** QUEUE_SIZE,
     head: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
@@ -80,7 +80,7 @@ pub const PerCpuQueue = struct {
     }
 };
 
-/// Enhanced queue manager with optional dependencies
+// Enhanced queue manager with optional dependencies
 pub const QueueManager = struct {
     cpu_queues: [MAX_CPUS]PerCpuQueue,
     num_cpus: u32,

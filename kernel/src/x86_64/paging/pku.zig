@@ -180,11 +180,12 @@ pub fn applyProtectionKey(entry: *u64, key: ProtectionKeys) void {
 
 // Create a page table entry with protection key
 pub fn createPageEntryWithKey(phys_addr: u64, flags: u64, key: ProtectionKeys) u64 {
-    if (!cpuid.getFeatures().pku) {
+    const features = cpuid.getFeatures();
+    if (features.pku) {
+        return phys_addr | flags | (@as(u64, @intFromEnum(key)) << 59);
+    } else {
         return phys_addr | flags;
     }
-
-    return phys_addr | flags | (@as(u64, key.toU4()) << PAGE_PKEY_SHIFT);
 }
 
 // Get appropriate protection key for a memory region type

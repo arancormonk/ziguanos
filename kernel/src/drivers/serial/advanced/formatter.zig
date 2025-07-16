@@ -6,7 +6,7 @@
 
 const std = @import("std");
 
-/// Enhanced formatter with optional sanitization
+// Enhanced formatter with optional sanitization
 pub const Formatter = struct {
     buffer: [4096]u8,
     pos: usize,
@@ -83,7 +83,7 @@ pub const Formatter = struct {
     };
 };
 
-/// Address sanitizer interface (optional dependency)
+// Address sanitizer interface (optional dependency)
 pub const AddressSanitizer = struct {
     kaslr_offset: u64,
 
@@ -102,7 +102,7 @@ pub const AddressSanitizer = struct {
     }
 };
 
-/// Formatter configuration with optional dependencies
+// Formatter configuration with optional dependencies
 pub const FormatterConfig = struct {
     address_sanitizer: ?*const AddressSanitizer = null,
 
@@ -117,7 +117,7 @@ pub const FormatterConfig = struct {
     }
 };
 
-/// Create a formatter with optional dependencies
+// Create a formatter with optional dependencies
 pub fn createFormatter(config: FormatterConfig) Formatter {
     return Formatter{
         .buffer = [_]u8{0} ** 4096,

@@ -6,7 +6,7 @@
 
 const regs = @import("../hal/registers.zig");
 
-/// Serial port enumeration
+// Serial port enumeration
 pub const ComPort = enum(u8) {
     COM1 = 1,
     COM2 = 2,
@@ -23,7 +23,7 @@ pub const ComPort = enum(u8) {
     }
 };
 
-/// Baud rate enumeration
+// Baud rate enumeration
 pub const BaudRate = enum(u32) {
     B1200 = 1200,
     B2400 = 2400,
@@ -48,7 +48,7 @@ pub const BaudRate = enum(u32) {
     }
 };
 
-/// Serial configuration structure
+// Serial configuration structure
 pub const SerialConfig = struct {
     port: ComPort,
     baud_rate: BaudRate,
@@ -57,7 +57,7 @@ pub const SerialConfig = struct {
     fifo_trigger_level: u8 = regs.FCR_TRIGGER_14,
 };
 
-/// Fixed-size ring buffer for early boot
+// Fixed-size ring buffer for early boot
 pub const RingBuffer = struct {
     buffer: [1024]u8,
     read_pos: usize,

@@ -3,8 +3,8 @@
 const std = @import("std");
 const serial = @import("../drivers/serial.zig");
 
-/// Minimal entry point for Application Processors
-/// This function is called directly from assembly code with cpu_id in RDI
+// Minimal entry point for Application Processors
+// This function is called directly from assembly code with cpu_id in RDI
 pub export fn apEntryWrapper(cpu_id: u32) callconv(.C) noreturn {
     // Write immediate debug marker to verify we reached Zig code
     writeDebugMarker(0xAF00_0001);
@@ -40,7 +40,7 @@ pub export fn apEntryWrapper(cpu_id: u32) callconv(.C) noreturn {
     haltCpu();
 }
 
-/// Check if serial port is initialized (simple check)
+// Check if serial port is initialized (simple check)
 fn isSerialInitialized() bool {
     // Check if serial port seems responsive
     // Read Line Status Register
@@ -52,7 +52,7 @@ fn isSerialInitialized() bool {
     return lsr != 0xFF;
 }
 
-/// Write a debug marker to a known memory location
+// Write a debug marker to a known memory location
 fn writeDebugMarker(value: u32) void {
     // Write to a fixed debug location that we can examine
     const debug_addr = @as(*volatile u32, @ptrFromInt(0x1000_0000));
@@ -66,14 +66,14 @@ fn writeDebugMarker(value: u32) void {
     );
 }
 
-/// Write a hex byte to serial (simple implementation)
+// Write a hex byte to serial (simple implementation)
 fn writeHexByte(value: u8) void {
     const hex_chars = "0123456789ABCDEF";
     serial.directWrite(hex_chars[(value >> 4) & 0xF]);
     serial.directWrite(hex_chars[value & 0xF]);
 }
 
-/// Write error code to serial
+// Write error code to serial
 fn writeErrorCode(err: anyerror) void {
     // Just write a simple error indicator for now
     switch (err) {
@@ -87,7 +87,7 @@ fn writeErrorCode(err: anyerror) void {
 // External declaration for the real AP main entry point
 extern fn apMainEntry(cpu_id: u32) callconv(.C) noreturn;
 
-/// Call the real AP main entry point
+// Call the real AP main entry point
 fn callApMainEntry(cpu_id: u32) !void {
     // Validate CPU ID
     if (cpu_id == 0 or cpu_id >= 255) {
@@ -101,7 +101,7 @@ fn callApMainEntry(cpu_id: u32) !void {
     apMainEntry(cpu_id);
 }
 
-/// Halt the current CPU
+// Halt the current CPU
 fn haltCpu() noreturn {
     // Disable interrupts
     asm volatile ("cli");
@@ -112,7 +112,7 @@ fn haltCpu() noreturn {
     }
 }
 
-/// Panic handler for AP initialization
+// Panic handler for AP initialization
 pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn {
     _ = error_return_trace;
     _ = ret_addr;

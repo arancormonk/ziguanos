@@ -7,7 +7,7 @@
 const std = @import("std");
 const timing = @import("timing.zig");
 
-/// Message level enumeration
+// Message level enumeration
 pub const MessageLevel = enum(u8) {
     critical = 0,
     err = 1,
@@ -17,7 +17,7 @@ pub const MessageLevel = enum(u8) {
     trace = 5,
 };
 
-/// Security policy configuration
+// Security policy configuration
 pub const SecurityPolicy = struct {
     enable_serial: bool,
     sanitize_addresses: bool,

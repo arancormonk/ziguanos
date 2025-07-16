@@ -10,6 +10,7 @@ const cpuid = @import("cpuid.zig");
 const pmm = @import("../memory/pmm.zig");
 const stack_security = @import("stack_security.zig");
 const spinlock = @import("../lib/spinlock.zig");
+const error_utils = @import("../lib/error_utils.zig");
 
 // Import extracted modules
 const constants = @import("paging/constants.zig");
@@ -67,25 +68,20 @@ const MEMORY_TYPE_WB = pat.MEMORY_TYPE_WB;
 const PAGE_PAT_4K = pat.PAGE_PAT_4K;
 const PAGE_PAT_LARGE = pat.PAGE_PAT_LARGE;
 
-// Page table structures (must be page-aligned and in writable section)
-pub var pml4_table: [512]u64 align(4096) = [_]u64{0} ** 512;
-pub var pdpt_table: [512]u64 align(4096) = [_]u64{0} ** 512;
+// Import boot protocol for PageTableInfo
+const boot_protocol = @import("shared");
 
-// Phase 1: Minimal static page tables for early boot
-// 4GB is sufficient for kernel, KASLR range, and early boot structures
-// Each PD table maps 1GB, so 4 tables = 4GB
-pub var pd_tables: [4][512]u64 align(4096) = [_][512]u64{[_]u64{0} ** 512} ** 4;
+// Page table pointers - will be set from bootloader-allocated tables
+pub var pml4_table: *[512]u64 = undefined;
+pub var pdpt_table: *[512]u64 = undefined;
+pub var pd_tables: [][512]u64 = undefined;
+pub var kernel_pts: [][512]u64 = undefined;
 
-// Phase 2: Track dynamically allocated page tables after PMM is ready
-var dynamic_pd_tables: ?[]*[512]u64 = null;
-var dynamic_pd_count: usize = 0;
-// Additional page table for fine-grained kernel mapping
-var kernel_pd: [512]u64 align(4096) = [_]u64{0} ** 512;
-var kernel_pts: [16][512]u64 align(4096) = [_][512]u64{[_]u64{0} ** 512} ** 16; // 16 PT tables = 32MB coverage
+// Store page table info from bootloader
+var page_table_info: boot_protocol.PageTableInfo = undefined;
 
-// 4KB page tables for low memory fine-grained mapping (first 16MB)
-// Each PT covers 2MB, so we need 8 PTs for 16MB
-var low_mem_pts: [8][512]u64 align(4096) = [_][512]u64{[_]u64{0} ** 512} ** 8;
+// Track next available kernel PT for dynamic allocation
+var next_kernel_pt_index: usize = 0;
 
 // 5-level paging support (LA57)
 pub var pml5_table: [512]u64 align(4096) = [_]u64{0} ** 512;
@@ -139,23 +135,43 @@ fn getKernelBase() u64 {
 }
 
 pub fn init(boot_info: *const uefi_boot.UEFIBootInfo) void {
+    // Store page table info from bootloader
+    page_table_info = boot_info.page_table_info;
+
+    // Validate that bootloader provided page tables
+    if (page_table_info.pml4_phys_addr == 0 or page_table_info.pdpt_phys_addr == 0) {
+        serial.println("[PAGING] FATAL: Bootloader did not provide page tables!", .{});
+        serial.println("[PAGING] PML4: 0x{x}, PDPT: 0x{x}", .{ page_table_info.pml4_phys_addr, page_table_info.pdpt_phys_addr });
+        @panic("Cannot continue without page tables from bootloader");
+    }
+
+    if (page_table_info.pd_table_count == 0 or page_table_info.pt_table_count == 0) {
+        serial.println("[PAGING] FATAL: Invalid page table counts from bootloader!", .{});
+        serial.println("[PAGING] PD count: {}, PT count: {}", .{ page_table_info.pd_table_count, page_table_info.pt_table_count });
+        @panic("Cannot continue with zero page table counts");
+    }
+
+    // Map bootloader-provided tables to kernel virtual addresses
+    pml4_table = @as(*[512]u64, @ptrFromInt(page_table_info.pml4_phys_addr));
+    pdpt_table = @as(*[512]u64, @ptrFromInt(page_table_info.pdpt_phys_addr));
+
+    // Create slices for PD tables
+    const pd_base = @as([*][512]u64, @ptrFromInt(page_table_info.pd_table_base));
+    pd_tables = pd_base[0..page_table_info.pd_table_count];
+
+    // Create slices for PT tables
+    const pt_base = @as([*][512]u64, @ptrFromInt(page_table_info.pt_table_base));
+    kernel_pts = pt_base[0..page_table_info.pt_table_count];
+
+    serial.println("[PAGING] Using bootloader-allocated page tables:", .{});
+    serial.println("  PML4: 0x{x}", .{@intFromPtr(pml4_table)});
+    serial.println("  PDPT: 0x{x}", .{@intFromPtr(pdpt_table)});
+    serial.println("  PD tables: {} at 0x{x}", .{ pd_tables.len, @intFromPtr(pd_tables.ptr) });
+    serial.println("  PT tables: {} at 0x{x}", .{ kernel_pts.len, @intFromPtr(kernel_pts.ptr) });
+
     // Store initial CR3 for safety checks
     initial_cr3 = getCurrentPageTable();
-
-    // Stack protection disabled during initial page table setup
-    // as we're modifying the memory mappings that contain our own stack
-    serial.println("[PAGING] Initializing page tables...", .{});
     serial.println("[PAGING] Stack protection disabled during critical setup phase", .{});
-
-    // Clear all page tables
-    @memset(&pml4_table, 0);
-    @memset(&pdpt_table, 0);
-    for (&pd_tables) |*table| {
-        @memset(table, 0);
-    }
-    for (&low_mem_pts) |*table| {
-        @memset(table, 0);
-    }
 
     // Stack canary active to detect corruption
 
@@ -186,8 +202,8 @@ pub fn init(boot_info: *const uefi_boot.UEFIBootInfo) void {
     }
 
     // Load new page table
-    const pml4_phys_addr = runtime_info.getPhysicalAddress(&pml4_table);
-    const pml4_virt_addr = @intFromPtr(&pml4_table);
+    const pml4_phys_addr = page_table_info.pml4_phys_addr;
+    const pml4_virt_addr = @intFromPtr(pml4_table);
     serial.print("[PAGING] Loading PML4 virtual: ", .{});
     secure_print.printHex("", pml4_virt_addr);
     serial.print(", physical: 0x{x:0>16}", .{pml4_phys_addr});
@@ -298,15 +314,9 @@ pub fn init(boot_info: *const uefi_boot.UEFIBootInfo) void {
     // CRITICAL: Verify we can access the physical addresses we're using
     serial.println("[PAGING] Testing access to page table memory:", .{});
 
-    // Test accessing the physical page table data through our current virtual mapping
-    const pml4_phys_virt = runtime_info.physToVirt(pml4_phys_addr);
-    const pml4_phys_ptr = @as(*const u64, @ptrFromInt(pml4_phys_virt));
-    const pdpt_phys_virt = runtime_info.physToVirt(pdpt_phys);
-    const pdpt_phys_ptr = @as(*const u64, @ptrFromInt(pdpt_phys_virt));
-
-    serial.println("  Reading PML4 at physical 0x{x:0>16}: 0x{x:0>16}", .{ pml4_phys_addr, pml4_phys_ptr.* });
-
-    serial.println("  Reading PDPT at physical 0x{x:0>16}: 0x{x:0>16}", .{ pdpt_phys, pdpt_phys_ptr.* });
+    // Test reading through our current virtual addresses
+    serial.println("  Reading PML4 at physical 0x{x:0>16}: 0x{x:0>16}", .{ pml4_phys_addr, pml4_table[0] });
+    serial.println("  Reading PDPT at physical 0x{x:0>16}: 0x{x:0>16}", .{ page_table_info.pdpt_phys_addr, pdpt_table[0] });
 
     // Add memory barrier to ensure all previous writes are complete
     asm volatile ("mfence" ::: "memory");
@@ -368,13 +378,13 @@ pub fn init(boot_info: *const uefi_boot.UEFIBootInfo) void {
     serial.println("[PAGING] Page table setup complete - stack protection can now be safely enabled", .{});
 }
 
-/// Find the highest physical memory address from UEFI memory map
+// Find the highest physical memory address from UEFI memory map
 fn findHighestPhysicalAddress(boot_info: *const uefi_boot.UEFIBootInfo) u64 {
     var highest_addr: u64 = 0;
     var highest_usable_addr: u64 = 0;
 
     if (boot_info.memory_map_addr == 0 or boot_info.memory_map_descriptor_size == 0) {
-        // Default to 8GB if we can't read the memory map
+        // Default to 8GB if we can't read the memory map (matches static page tables)
         return 8 * PAGE_SIZE_1G;
     }
 
@@ -431,8 +441,8 @@ fn setupIdentityMapping(boot_info: *const uefi_boot.UEFIBootInfo) usize {
 
     // Set up PML4 entry (covers 512GB)
     // CRITICAL: Use PHYSICAL address for page table entries
-    const pdpt_phys_addr = runtime_info.getPhysicalAddress(&pdpt_table);
-    const pdpt_virt_addr = @intFromPtr(&pdpt_table);
+    const pdpt_phys_addr = page_table_info.pdpt_phys_addr;
+    const pdpt_virt_addr = @intFromPtr(pdpt_table);
     serial.print("[PAGING] PDPT virtual: ", .{});
     secure_print.printHex("", pdpt_virt_addr);
     serial.print(", physical: 0x{x:0>16}", .{pdpt_phys_addr});
@@ -442,7 +452,7 @@ fn setupIdentityMapping(boot_info: *const uefi_boot.UEFIBootInfo) usize {
     // Validate the PML4 entry
     validateEntry(pml4_table[0], 4) catch |err| {
         serial.print("[PAGING] ERROR: PML4 entry validation failed: ", .{});
-        serial.println("{s}", .{@errorName(err)});
+        serial.println("{s}", .{error_utils.errorToString(err)});
     };
 
     // Determine how much memory we need to map
@@ -457,9 +467,7 @@ fn setupIdentityMapping(boot_info: *const uefi_boot.UEFIBootInfo) usize {
     serial.println("[PAGING] Kernel spans GB 0x{x:0>16} to GB 0x{x:0>16}", .{ kernel_start_gb, kernel_end_gb - 1 });
 
     // 2. Also consider where our stack and page tables are (they're in BSS after kernel)
-    // The page tables can extend significantly beyond kernel_end
-    const page_tables_end = @intFromPtr(&pd_tables) + @sizeOf(@TypeOf(pd_tables));
-    const page_tables_gb = @divFloor(page_tables_end + PAGE_SIZE_1G - 1, PAGE_SIZE_1G);
+    // Page tables are now allocated by bootloader, no need to track their end
 
     // 3. CRITICAL: Add extra space for stack growth and alignment
     // The kernel_size doesn't include the full memory needed for stack operations
@@ -472,14 +480,22 @@ fn setupIdentityMapping(boot_info: *const uefi_boot.UEFIBootInfo) usize {
     const highest_phys_addr = findHighestPhysicalAddress(boot_info);
     const highest_phys_gb = @divFloor(highest_phys_addr, PAGE_SIZE_1G);
 
-    // Map all physical memory, but ensure we cover at least the kernel
-    // Phase 1: Map minimum required for early boot (4GB or where kernel ends)
+    // Use the page table count from bootloader to determine how much we can map
+    const max_mappable_gbs = pd_tables.len; // Each PD table maps 1GB
+
+    // Ensure we map at least enough to cover the kernel
     const min_gbs = @max(4, safe_kernel_end_gb); // At least 4GB or where kernel ends
-    const gbs_to_map = @max(min_gbs, @max(highest_phys_gb, page_tables_gb + 1));
+
+    // Use the bootloader's calculated amount, which should match highest_phys_gb
+    const gbs_to_map = @min(max_mappable_gbs, @max(min_gbs, highest_phys_gb));
+
+    if (gbs_to_map < highest_phys_gb) {
+        serial.println("[PAGING] WARNING: Only mapping {} GB but system has {} GB", .{ gbs_to_map, highest_phys_gb });
+    }
 
     serial.print("[PAGING] Mapping ", .{});
     serial.print("0x{x:0>16}", .{gbs_to_map});
-    serial.println(" GB of memory to cover kernel at high address", .{});
+    serial.println(" GB of memory (have {} PD tables)", .{pd_tables.len});
 
     // Set up PDPT entries (each covers 1GB)
     // Map using either 1GB or 2MB pages
@@ -513,7 +529,8 @@ fn setupIdentityMapping(boot_info: *const uefi_boot.UEFIBootInfo) usize {
                 // Don't use a 1GB page for the kernel GB - we need finer control
                 // Allocate a PD table for this GB if available
                 if (i < pd_tables.len) {
-                    const pd_phys_addr = runtime_info.getPhysicalAddress(&pd_tables[i]);
+                    // Calculate physical address from bootloader-provided base
+                    const pd_phys_addr = page_table_info.pd_table_base + (i * 4096);
                     pdpt_table[i] = pd_phys_addr | PAGE_PRESENT | PAGE_WRITABLE;
 
                     // Fill the PD with 2MB pages
@@ -558,7 +575,7 @@ fn setupIdentityMapping(boot_info: *const uefi_boot.UEFIBootInfo) usize {
                 serial.print("[PAGING] ERROR: PDPT entry ", .{});
                 serial.print("{}", .{i});
                 serial.print(" validation failed: ", .{});
-                serial.println("{s}", .{@errorName(err)});
+                serial.println("{s}", .{error_utils.errorToString(err)});
             };
 
             serial.print("[PAGING] Identity map GB ", .{});
@@ -585,14 +602,16 @@ fn setupIdentityMapping(boot_info: *const uefi_boot.UEFIBootInfo) usize {
             serial.println(" GB)", .{});
         }
         for (0..max_gbs) |i| {
-            pdpt_table[i] = runtime_info.getPhysicalAddress(&pd_tables[i]) | PAGE_PRESENT | PAGE_WRITABLE;
+            // Calculate physical address from bootloader-provided base
+            const pd_phys_addr = page_table_info.pd_table_base + (i * 4096);
+            pdpt_table[i] = pd_phys_addr | PAGE_PRESENT | PAGE_WRITABLE;
 
             // Validate the PDPT entry (points to PD table, not a huge page)
             validateEntry(pdpt_table[i], 3) catch |err| {
                 serial.print("[PAGING] ERROR: PDPT entry ", .{});
                 serial.print("{}", .{i});
                 serial.print(" validation failed: ", .{});
-                serial.println("{s}", .{@errorName(err)});
+                serial.println("{s}", .{error_utils.errorToString(err)});
             };
         }
 
@@ -706,7 +725,7 @@ fn setupKernelProtection(_: *const uefi_boot.UEFIBootInfo) void {
 
         if (kernel_in_first_gb) {
             // When kernel is in first GB, replace it with a PD table for fine-grained control
-            const kernel_pd_phys_addr = runtime_info.getPhysicalAddress(&kernel_pd);
+            const kernel_pd_phys_addr = page_table_info.pd_table_base; // First PD table
             serial.println("[PAGING] kernel_pd at physical: 0x{x:0>16}", .{kernel_pd_phys_addr});
             pdpt_table[0] = kernel_pd_phys_addr | PAGE_PRESENT | PAGE_WRITABLE;
         } else {
@@ -729,7 +748,7 @@ fn setupKernelProtection(_: *const uefi_boot.UEFIBootInfo) void {
                 // Use one of the pre-allocated PD tables for this
                 // We'll use pd_tables[kernel_gb] if available
                 if (kernel_gb < pd_tables.len) {
-                    const pd_phys_addr = runtime_info.getPhysicalAddress(&pd_tables[kernel_gb]);
+                    const pd_phys_addr = page_table_info.pd_table_base + (kernel_gb * 4096);
                     serial.println("[PAGING] Replacing 1GB page with PD table at physical: 0x{x:0>16}", .{pd_phys_addr});
 
                     // First, fill the PD with 2MB pages to maintain the identity mapping
@@ -763,6 +782,10 @@ fn setupKernelProtection(_: *const uefi_boot.UEFIBootInfo) void {
                 }
             } else {
                 // Already have a PD table, make sure kernel region entries are cleared
+                if (kernel_gb >= pd_tables.len) {
+                    serial.println("[PAGING] ERROR: Kernel is in GB {} but only {} PD tables available", .{ kernel_gb, pd_tables.len });
+                    return;
+                }
                 const pd_table = &pd_tables[kernel_gb];
                 const kernel_2mb_start = kernel_base & ~@as(u64, PAGE_SIZE_2M - 1);
                 const kernel_2mb_end = (kernel_base + info.kernel_size + PAGE_SIZE_2M - 1) & ~@as(u64, PAGE_SIZE_2M - 1);
@@ -801,8 +824,8 @@ fn setupKernelProtection(_: *const uefi_boot.UEFIBootInfo) void {
 
             // Set up 4KB pages for first 16MB
             for (0..low_mem_pt_count) |i| {
-                const pt_phys_addr = runtime_info.getPhysicalAddress(&low_mem_pts[i]);
-                kernel_pd[i] = pt_phys_addr | PAGE_PRESENT | PAGE_WRITABLE; // Point to PT, not a huge page
+                const pt_phys_addr = page_table_info.pt_table_base + (i * 4096);
+                pd_tables[0][i] = pt_phys_addr | PAGE_PRESENT | PAGE_WRITABLE; // Point to PT, not a huge page
 
                 // Fill the PT with 4KB pages
                 for (0..512) |j| {
@@ -813,13 +836,13 @@ fn setupKernelProtection(_: *const uefi_boot.UEFIBootInfo) void {
                     if (page_addr == 0) {
                         // First page (0x0-0xFFF) contains AP debug area at 0x500
                         // Must be mapped for SMP but keep NX for security
-                        low_mem_pts[i][j] = page_addr | flags | PAGE_NO_EXECUTE;
+                        kernel_pts[i][j] = page_addr | flags | PAGE_NO_EXECUTE;
                     } else if (page_addr == 0x8000) {
                         // AP trampoline - needs to be executable
-                        low_mem_pts[i][j] = page_addr | flags; // No NX bit
+                        kernel_pts[i][j] = page_addr | flags; // No NX bit
                     } else {
                         // Everything else gets NX bit
-                        low_mem_pts[i][j] = page_addr | flags | PAGE_NO_EXECUTE;
+                        kernel_pts[i][j] = page_addr | flags | PAGE_NO_EXECUTE;
                     }
                 }
             }
@@ -833,7 +856,7 @@ fn setupKernelProtection(_: *const uefi_boot.UEFIBootInfo) void {
             while (addr < map_up_to and pd_idx < 512) {
                 // Identity mapping: virtual address = physical address
                 const phys_addr = addr; // This is critical!
-                kernel_pd[pd_idx] = phys_addr | PAGE_PRESENT | PAGE_WRITABLE | PAGE_HUGE | PAGE_NO_EXECUTE;
+                pd_tables[0][pd_idx] = phys_addr | PAGE_PRESENT | PAGE_WRITABLE | PAGE_HUGE | PAGE_NO_EXECUTE;
                 addr += PAGE_SIZE_2M;
                 pd_idx += 1;
             }
@@ -889,7 +912,8 @@ fn setupKernelProtection(_: *const uefi_boot.UEFIBootInfo) void {
             // CRITICAL: We must also ensure the stack remains mapped!
             // The stack is typically placed after the page tables in BSS
             // For safety, let's extend mapping by 2MB to cover stack
-            const page_tables_end = @intFromPtr(&kernel_pd) + @sizeOf(@TypeOf(kernel_pd));
+            // Page tables are allocated by bootloader, use kernel end for stack calculation
+            const page_tables_end = kernel_base + info.kernel_size;
             const safe_end = page_tables_end + 0x200000; // Add 2MB for stack
             const extended_end = safe_end & ~@as(u64, PAGE_SIZE_4K - 1); // Align down to page boundary
 
@@ -930,7 +954,7 @@ fn setupKernelProtection(_: *const uefi_boot.UEFIBootInfo) void {
                     serial.println(" exceeds bounds during PT setup!", .{});
                     break;
                 }
-                kernel_pd[pd_entry_idx] = runtime_info.getPhysicalAddress(&kernel_pts[i]) | PAGE_PRESENT | PAGE_WRITABLE;
+                pd_tables[0][pd_entry_idx] = (page_table_info.pt_table_base + (i * 4096)) | PAGE_PRESENT | PAGE_WRITABLE;
             }
 
             // PT tables set up
@@ -968,7 +992,7 @@ fn setupKernelProtection(_: *const uefi_boot.UEFIBootInfo) void {
             while (addr < actual_end and pd_idx < max_safe_entries) {
                 // Write the PD entry with identity mapping
                 const phys_addr = addr; // Identity: virtual = physical
-                kernel_pd[pd_idx] = phys_addr | PAGE_PRESENT | PAGE_WRITABLE | PAGE_HUGE | PAGE_NO_EXECUTE;
+                pd_tables[0][pd_idx] = phys_addr | PAGE_PRESENT | PAGE_WRITABLE | PAGE_HUGE | PAGE_NO_EXECUTE;
                 addr += PAGE_SIZE_2M;
                 pd_idx += 1;
             }
@@ -989,10 +1013,15 @@ fn setupKernelProtection(_: *const uefi_boot.UEFIBootInfo) void {
             const kernel_pd_idx = @divFloor(kernel_2mb_start % PAGE_SIZE_1G, PAGE_SIZE_2M);
 
             // Get the PD table for the kernel's GB
+            if (kernel_gb >= pd_tables.len) {
+                serial.println("[PAGING] ERROR: Kernel is in GB {} but only {} PD tables available", .{ kernel_gb, pd_tables.len });
+                return;
+            }
             const pd_table = &pd_tables[kernel_gb];
 
             // Find where our page tables start (they're in BSS after kernel)
-            const page_tables_end = @intFromPtr(&kernel_pd) + @sizeOf(@TypeOf(kernel_pd));
+            // Page tables are allocated by bootloader, use kernel end for stack calculation
+            const page_tables_end = kernel_base + info.kernel_size;
             const safe_end = page_tables_end + 0x200000; // Add 2MB for stack
             const extended_end = safe_end & ~@as(u64, PAGE_SIZE_4K - 1); // Align down to page boundary
 
@@ -1030,7 +1059,7 @@ fn setupKernelProtection(_: *const uefi_boot.UEFIBootInfo) void {
                     serial.println(" exceeds bounds during PT setup!", .{});
                     break;
                 }
-                pd_table.*[pd_entry_idx] = runtime_info.getPhysicalAddress(&kernel_pts[i]) | PAGE_PRESENT | PAGE_WRITABLE;
+                pd_table.*[pd_entry_idx] = (page_table_info.pt_table_base + (i * 4096)) | PAGE_PRESENT | PAGE_WRITABLE;
             }
 
             // Map 4K pages with appropriate permissions
@@ -1044,13 +1073,18 @@ fn setupKernelProtection(_: *const uefi_boot.UEFIBootInfo) void {
         const kernel_pd_idx = @divFloor(kernel_start_page % PAGE_SIZE_1G, PAGE_SIZE_2M);
 
         // Get the PD table for the kernel's GB
+        if (kernel_gb_idx >= pd_tables.len) {
+            serial.println("[PAGING] ERROR: Kernel is in GB {} but only {} PD tables available", .{ kernel_gb_idx, pd_tables.len });
+            return;
+        }
         const pd_table = &pd_tables[kernel_gb_idx];
 
         // Map kernel area with 4K pages
         // Find where our page tables start (they're in BSS after kernel)
         _ = @intFromPtr(&kernel_pts); // page_tables_start not needed after change
         // CRITICAL: We must also ensure the stack remains mapped!
-        const page_tables_end = @intFromPtr(&kernel_pd) + @sizeOf(@TypeOf(kernel_pd));
+        // Page tables are allocated by bootloader, use kernel end for stack calculation
+        const page_tables_end = kernel_base + info.kernel_size;
         const safe_end = page_tables_end + 0x200000; // Add 2MB for stack
         const extended_end = safe_end & ~@as(u64, PAGE_SIZE_4K - 1); // Align down to page boundary
         const kernel_2mb_start = kernel_start_page & ~@as(u64, PAGE_SIZE_2M - 1);
@@ -1061,7 +1095,7 @@ fn setupKernelProtection(_: *const uefi_boot.UEFIBootInfo) void {
         for (0..num_2mb_pages) |i| {
             const pd_entry_idx = kernel_pd_idx + i;
             if (pd_entry_idx < 512 and i < kernel_pts.len) {
-                pd_table.*[pd_entry_idx] = runtime_info.getPhysicalAddress(&kernel_pts[i]) | PAGE_PRESENT | PAGE_WRITABLE;
+                pd_table.*[pd_entry_idx] = (page_table_info.pt_table_base + (i * 4096)) | PAGE_PRESENT | PAGE_WRITABLE;
             }
         }
 
@@ -1143,6 +1177,15 @@ fn applyKernelPermissions4K(region_start: u64, region_end: u64, kernel_start: u6
     } else {
         serial.println("  WARNING: Cannot add guard page - out of bounds", .{});
     }
+
+    // Update next_kernel_pt_index to track which PTs have been used
+    // If we used any entries in current_pt, we need to mark it as used
+    if (pt_idx > 0) {
+        next_kernel_pt_index = current_pt + 1;
+    } else {
+        next_kernel_pt_index = current_pt;
+    }
+    serial.println("[PAGING] Kernel protection used {} PT tables", .{next_kernel_pt_index});
 }
 
 fn applyMemoryPermissions(boot_info: *const uefi_boot.UEFIBootInfo) void {
@@ -1229,118 +1272,9 @@ pub const switchPageTableNoFlush = pcid.switchPageTableNoFlush;
 pub const invalidatePCID = pcid.invalidatePCID;
 pub const isPCIDSupported = pcid.isSupported;
 
-/// Get the highest mapped physical address
+// Get the highest mapped physical address
 pub fn getHighestMappedPhysicalAddress() u64 {
     return highest_mapped_physical_addr;
-}
-
-/// Phase 2: Extend memory mapping after PMM is initialized
-/// This function dynamically allocates page tables to map all available physical memory
-pub fn extendMemoryMapping(boot_info: *const uefi_boot.UEFIBootInfo) !void {
-    serial.println("[PAGING] Phase 2: Extending memory mapping with dynamic page tables", .{});
-
-    // Determine how much memory we need to map
-    const highest_phys_addr = findHighestPhysicalAddress(boot_info);
-    const total_gbs_needed = @divFloor(highest_phys_addr, PAGE_SIZE_1G);
-
-    // We already mapped some GBs in phase 1
-    const already_mapped_gbs = @divFloor(highest_mapped_physical_addr, PAGE_SIZE_1G);
-
-    if (total_gbs_needed <= already_mapped_gbs) {
-        serial.println("[PAGING] All physical memory already mapped in phase 1", .{});
-        return;
-    }
-
-    const additional_gbs = total_gbs_needed - already_mapped_gbs;
-    serial.println("[PAGING] Need to map {} additional GB (from GB {} to {})", .{ additional_gbs, already_mapped_gbs, total_gbs_needed - 1 });
-
-    // Check if we need more than 512GB (would require multiple PDPT tables)
-    if (total_gbs_needed > 512) {
-        serial.println("[PAGING] WARNING: System has {} GB but current implementation supports up to 512 GB", .{total_gbs_needed});
-        serial.println("[PAGING] Capping at 512 GB. Full multi-TB support requires multiple PDPT allocation", .{});
-    }
-
-    // Cap at 512GB for now (single PDPT limit)
-    const effective_total_gbs = @min(total_gbs_needed, 512);
-    const effective_additional_gbs = if (effective_total_gbs > already_mapped_gbs)
-        effective_total_gbs - already_mapped_gbs
-    else
-        0;
-
-    if (effective_additional_gbs == 0) {
-        serial.println("[PAGING] Already at mapping limit", .{});
-        return;
-    }
-
-    // Allocate page tables for the additional memory
-    const pd_tables_needed = effective_additional_gbs;
-    const pages_needed = pd_tables_needed; // Each PD table is one 4KB page
-
-    serial.println("[PAGING] Need to allocate {} pages for extended page tables", .{pages_needed});
-
-    // Check if the allocation is reasonable
-    if (pages_needed > 1000) {
-        serial.println("[PAGING] ERROR: Excessive page table allocation request ({} pages = {} MB)", .{ pages_needed, (pages_needed * 4) / 1024 });
-        serial.println("[PAGING] This would likely cause memory corruption. Aborting extension.", .{});
-        return;
-    }
-
-    // Allocate memory for the new page tables
-    const pd_tables_phys = pmm.allocPagesTagged(pages_needed, pmm.MemoryTag.PAGE_TABLES) orelse {
-        serial.println("[PAGING] ERROR: Failed to allocate {} pages for extended page tables", .{pages_needed});
-        return error.OutOfMemory;
-    };
-
-    serial.println("[PAGING] Allocated {} pages at 0x{x:0>16} for extended page tables", .{ pages_needed, pd_tables_phys });
-
-    // Sanity check: make sure the allocation is in mapped memory
-    if (pd_tables_phys >= highest_mapped_physical_addr) {
-        serial.println("[PAGING] ERROR: Page tables allocated beyond mapped memory!", .{});
-        pmm.freePages(pd_tables_phys, pages_needed);
-        return error.OutOfMemory;
-    }
-
-    // Map the new page tables and extend the mappings
-    var current_phys = pd_tables_phys;
-
-    for (already_mapped_gbs..effective_total_gbs) |gb_idx| {
-        // Should not happen now that we cap at 512GB
-        if (gb_idx >= pdpt_table.len) {
-            serial.println("[PAGING] ERROR: Unexpected PDPT overflow at {} GB", .{gb_idx});
-            break;
-        }
-
-        // Map the PD table page itself so we can write to it
-        const pd_table_ptr = @as(*[512]u64, @ptrFromInt(current_phys));
-
-        // Clear the new PD table
-        @memset(pd_table_ptr, 0);
-
-        // Set up the PDPT entry
-        pdpt_table[gb_idx] = current_phys | PAGE_PRESENT | PAGE_WRITABLE;
-
-        // Fill the PD table with 2MB pages
-        const gb_start_addr = gb_idx * PAGE_SIZE_1G;
-        for (0..512) |j| {
-            const phys_addr = gb_start_addr + (j * PAGE_SIZE_2M);
-            pd_table_ptr[j] = phys_addr | PAGE_PRESENT | PAGE_WRITABLE | PAGE_HUGE | PAGE_NO_EXECUTE;
-        }
-
-        // Log progress every 64GB instead of every GB to reduce spam
-        if (gb_idx % 64 == 0 or gb_idx == effective_total_gbs - 1) {
-            serial.println("[PAGING] Mapped up to GB {} (0x{x:0>16})", .{ gb_idx, gb_start_addr + PAGE_SIZE_1G - 1 });
-        }
-
-        current_phys += PAGE_SIZE_4K;
-    }
-
-    // Update the highest mapped physical address
-    highest_mapped_physical_addr = effective_total_gbs * PAGE_SIZE_1G;
-
-    // Flush TLB to ensure new mappings take effect
-    flushTLB();
-
-    serial.println("[PAGING] Extended mapping complete: now covering {} GB total", .{@divFloor(highest_mapped_physical_addr, PAGE_SIZE_1G)});
 }
 
 // Print page table info
@@ -1490,9 +1424,8 @@ fn split1GBPage(pdpt: *[512]u64, pdpt_idx: usize) !void {
     serial.println("[PAGING] PD virtual address: 0x{x}", .{pd_virt});
 
     // Check if this physical address is within our mapped range
-    const max_mapped_phys = 8 * PAGE_SIZE_1G; // We map 8GB initially
-    if (pd_phys >= max_mapped_phys) {
-        serial.println("[PAGING] ERROR: Allocated page table at 0x{x} is beyond mapped memory (max 0x{x})", .{ pd_phys, max_mapped_phys });
+    if (pd_phys >= highest_mapped_physical_addr) {
+        serial.println("[PAGING] ERROR: Allocated page table at 0x{x} is beyond mapped memory (max 0x{x})", .{ pd_phys, highest_mapped_physical_addr });
         return error.PageTableBeyondMappedMemory;
     }
 
@@ -1591,14 +1524,17 @@ fn split2MBPageAt(pd: *[512]u64, pd_idx: usize, pd_virt_base: u64) !void {
         invalidatePage(flush_addr);
     }
 
-    // Step 5: Allocate a new PT table
-    const pt_phys = pmm.allocPagesTagged(1, .PAGE_TABLES) orelse return error.OutOfMemory;
-    serial.println("[PAGING] Allocated PT at physical 0x{x}", .{pt_phys});
-
-    // Debug: Verify this page is actually free and accessible
-    if (pt_phys < 0x100000) {
-        serial.println("[PAGING] WARNING: Allocated page is in low memory (< 1MB), might be reserved!", .{});
+    // Step 5: Use pre-allocated PT from bootloader
+    if (next_kernel_pt_index >= kernel_pts.len) {
+        serial.println("[PAGING] ERROR: Out of pre-allocated PT tables! Need {} but only have {}", .{ next_kernel_pt_index + 1, kernel_pts.len });
+        return error.OutOfPageTables;
     }
+
+    const pt_index = next_kernel_pt_index;
+    next_kernel_pt_index += 1;
+
+    const pt_phys = page_table_info.pt_table_base + (pt_index * 4096);
+    serial.println("[PAGING] Using pre-allocated PT[{}] at physical 0x{x}", .{ pt_index, pt_phys });
 
     const pt_virt = runtime_info.physToVirt(pt_phys);
     serial.println("[PAGING] PT virtual address: 0x{x}", .{pt_virt});
@@ -1610,9 +1546,8 @@ fn split2MBPageAt(pd: *[512]u64, pd_idx: usize, pd_virt_base: u64) !void {
     }
 
     // Check if this physical address is within our mapped range
-    const max_mapped_phys = 8 * PAGE_SIZE_1G; // We map 8GB initially
-    if (pt_phys >= max_mapped_phys) {
-        serial.println("[PAGING] ERROR: Allocated page table at 0x{x} is beyond mapped memory (max 0x{x})", .{ pt_phys, max_mapped_phys });
+    if (pt_phys >= highest_mapped_physical_addr) {
+        serial.println("[PAGING] ERROR: Allocated page table at 0x{x} is beyond mapped memory (max 0x{x})", .{ pt_phys, highest_mapped_physical_addr });
         return error.PageTableBeyondMappedMemory;
     }
 
@@ -1880,8 +1815,8 @@ pub fn mapPageWithKey(virt_addr: u64, phys_addr: u64, flags: u64, key: pku.Prote
     try mapPageRaw(virt_addr, entry);
 }
 
-/// Get the physical address that a virtual address maps to
-/// Handles 4KB, 2MB, and 1GB pages correctly
+// Get the physical address that a virtual address maps to
+// Handles 4KB, 2MB, and 1GB pages correctly
 pub fn getPhysicalAddress(virt_addr: u64) !u64 {
     const pte = try getPageTableEntry(virt_addr);
 
@@ -1967,8 +1902,8 @@ pub fn testAllPagingFeatures() void {
     testPagingMemoryProtection();
 }
 
-/// Make a memory region executable (removes NX bit)
-/// This is needed for the AP trampoline code
+// Make a memory region executable (removes NX bit)
+// This is needed for the AP trampoline code
 pub fn makeRegionExecutable(start_addr: u64, size: u64) !void {
     const aligned_start = start_addr & ~@as(u64, PAGE_SIZE_4K - 1);
     const aligned_end = (start_addr + size + PAGE_SIZE_4K - 1) & ~@as(u64, PAGE_SIZE_4K - 1);
@@ -2158,7 +2093,7 @@ pub fn makeRegionUncacheable(start_addr: u64, size: u64) !void {
     // For regions in the first 2MB, we need to handle it specially
     if (aligned_start < PAGE_SIZE_2M) {
         // The first 2MB is mapped directly in kernel_pd[0]
-        const old_entry = kernel_pd[0];
+        const old_entry = pd_tables[0][0];
 
         // Check if this is a 2MB page
         if ((old_entry & PAGE_HUGE) != 0) {
@@ -2168,7 +2103,7 @@ pub fn makeRegionUncacheable(start_addr: u64, size: u64) !void {
             // This is complex - for now, just set the entire 2MB page as uncacheable
             // Set PCD (Page Cache Disable) and PWT (Page Write Through) bits
             const new_entry = old_entry | PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH;
-            kernel_pd[0] = new_entry;
+            pd_tables[0][0] = new_entry;
             serial.println("[PAGING] Updated first 2MB page to uncacheable: 0x{x}", .{new_entry});
 
             // Flush TLB for the entire 2MB page
@@ -2268,8 +2203,8 @@ pub fn updatePageFlags(virt_addr: u64, new_flags: u64) !void {
     invalidatePage(virt_addr);
 }
 
-/// Map a memory-mapped I/O (MMIO) region as uncacheable
-/// This is critical for device registers like APIC, where caching can cause incorrect behavior
+// Map a memory-mapped I/O (MMIO) region as uncacheable
+// This is critical for device registers like APIC, where caching can cause incorrect behavior
 pub fn mapMMIORegion(virt_addr: u64, phys_addr: u64, size: usize) !void {
     var guard = stack_security.protect();
     defer guard.deinit();
@@ -2376,8 +2311,8 @@ pub fn mapMMIORegion(virt_addr: u64, phys_addr: u64, size: usize) !void {
     serial.println("[PAGING] MMIO region mapped successfully", .{});
 }
 
-/// Ensure a region is identity mapped (virtual address = physical address)
-/// This is critical for AP trampoline code
+// Ensure a region is identity mapped (virtual address = physical address)
+// This is critical for AP trampoline code
 pub fn ensureIdentityMapping(virt_addr: u64, size: u64) !void {
     var guard = stack_security.protect();
     defer guard.deinit();

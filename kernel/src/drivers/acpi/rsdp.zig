@@ -1,12 +1,12 @@
 // Copyright 2025 arancormonk
 // SPDX-License-Identifier: MIT
 
-//! RSDP/RSDT/XSDT parsing for ACPI table discovery
+// RSDP/RSDT/XSDT parsing for ACPI table discovery
 
 const std = @import("std");
 const tables = @import("tables.zig");
 
-/// RSDP descriptor for ACPI 1.0
+// RSDP descriptor for ACPI 1.0
 pub const RSDPDescriptor = extern struct {
     signature: [8]u8,
     checksum: u8,
@@ -28,7 +28,7 @@ pub const RSDPDescriptor = extern struct {
     }
 };
 
-/// Extended RSDP descriptor for ACPI 2.0+
+// Extended RSDP descriptor for ACPI 2.0+
 pub const RSDPDescriptor20 = extern struct {
     // ACPI 1.0 compatible part
     first_part: RSDPDescriptor,
@@ -61,7 +61,7 @@ pub const RSDPDescriptor20 = extern struct {
     }
 };
 
-/// Root System Description Table (32-bit pointers)
+// Root System Description Table (32-bit pointers)
 pub const RSDT = extern struct {
     header: tables.Header,
     // Followed by array of 32-bit pointers to other tables
@@ -77,7 +77,7 @@ pub const RSDT = extern struct {
     }
 };
 
-/// Extended System Description Table (64-bit pointers)
+// Extended System Description Table (64-bit pointers)
 pub const XSDT = extern struct {
     header: tables.Header,
     // Followed by array of 64-bit pointers to other tables
@@ -93,7 +93,7 @@ pub const XSDT = extern struct {
     }
 };
 
-/// Calculate checksum for ACPI tables
+// Calculate checksum for ACPI tables
 fn calculateChecksum(bytes: []const u8) u8 {
     var sum: u8 = 0;
     for (bytes) |byte| {
@@ -102,7 +102,7 @@ fn calculateChecksum(bytes: []const u8) u8 {
     return sum;
 }
 
-/// Validate any ACPI table with standard header
+// Validate any ACPI table with standard header
 pub fn validateTable(header: *const tables.Header) tables.Error!void {
     const bytes = @as([*]const u8, @ptrCast(header))[0..header.length];
     if (calculateChecksum(bytes) != 0) {
@@ -110,7 +110,7 @@ pub fn validateTable(header: *const tables.Header) tables.Error!void {
     }
 }
 
-/// Find RSDP in system memory (searches common locations)
+// Find RSDP in system memory (searches common locations)
 pub fn findRSDP(rsdp_address: ?u64) ?*const RSDPDescriptor20 {
     // If we have a UEFI-provided address, try it first
     if (rsdp_address) |addr| {
@@ -124,7 +124,7 @@ pub fn findRSDP(rsdp_address: ?u64) ?*const RSDPDescriptor20 {
     return null;
 }
 
-/// Enumerate all tables from RSDT
+// Enumerate all tables from RSDT
 pub fn enumerateRSDT(rsdt: *const RSDT, signature: []const u8, callback: fn (*const tables.Header) anyerror!void) !void {
     const pointers = rsdt.getTablePointers();
 
@@ -140,7 +140,7 @@ pub fn enumerateRSDT(rsdt: *const RSDT, signature: []const u8, callback: fn (*co
     }
 }
 
-/// Enumerate all tables from XSDT
+// Enumerate all tables from XSDT
 pub fn enumerateXSDT(xsdt: *const XSDT, signature: []const u8, callback: fn (*const tables.Header) anyerror!void) !void {
     const pointers = xsdt.getTablePointers();
 

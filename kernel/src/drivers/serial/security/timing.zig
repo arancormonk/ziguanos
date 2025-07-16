@@ -8,30 +8,30 @@
 const std = @import("std");
 const timer = @import("../../../x86_64/timer.zig");
 
-/// Timing security configuration
+// Timing security configuration
 pub const TimingConfig = struct {
-    /// Enable rate limiting
+    // Enable rate limiting
     enable_rate_limiting: bool = true,
 
-    /// Maximum bytes per second for rate limiting
+    // Maximum bytes per second for rate limiting
     max_bytes_per_second: u32 = 1024,
 
-    /// Enable fixed interval buffering
+    // Enable fixed interval buffering
     enable_fixed_interval: bool = true,
 
-    /// Fixed interval in microseconds (default: 10ms)
+    // Fixed interval in microseconds (default: 10ms)
     fixed_interval_us: u64 = 10_000,
 
-    /// Maximum burst size before rate limiting kicks in
+    // Maximum burst size before rate limiting kicks in
     burst_size: u32 = 256,
 
-    /// Disable all serial output (for production)
+    // Disable all serial output (for production)
     disable_serial: bool = false,
 
-    /// Add artificial delays to normalize timing
+    // Add artificial delays to normalize timing
     enable_timing_normalization: bool = true,
 
-    /// Base delay in microseconds for timing normalization
+    // Base delay in microseconds for timing normalization
     base_delay_us: u64 = 100,
 
     pub fn development() TimingConfig {
@@ -68,7 +68,7 @@ pub const TimingConfig = struct {
     }
 };
 
-/// Rate limiter using token bucket algorithm
+// Rate limiter using token bucket algorithm
 pub const RateLimiter = struct {
     config: TimingConfig,
     tokens: u32,
@@ -133,7 +133,7 @@ pub const RateLimiter = struct {
     }
 };
 
-/// Fixed interval buffer for timing normalization
+// Fixed interval buffer for timing normalization
 pub const FixedIntervalBuffer = struct {
     const BUFFER_SIZE = 4096;
 
@@ -209,7 +209,7 @@ pub const FixedIntervalBuffer = struct {
     }
 };
 
-/// Timing normalizer to add consistent delays
+// Timing normalizer to add consistent delays
 pub const TimingNormalizer = struct {
     config: TimingConfig,
     last_operation_time: u64,
@@ -249,7 +249,7 @@ pub const TimingNormalizer = struct {
     }
 };
 
-/// Main timing security manager
+// Main timing security manager
 pub const TimingSecurity = struct {
     config: TimingConfig,
     rate_limiter: RateLimiter,

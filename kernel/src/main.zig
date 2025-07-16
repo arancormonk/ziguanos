@@ -9,6 +9,8 @@ const secure_print = @import("lib/secure_print.zig");
 const gdt = @import("x86_64/gdt.zig");
 const boot = @import("boot/init.zig");
 const spinlock = @import("lib/spinlock.zig");
+const pmm = @import("memory/pmm.zig");
+const error_utils = @import("lib/error_utils.zig");
 
 // Import initialization modules
 const early_init = @import("init/early.zig");
@@ -27,7 +29,7 @@ var saved_boot_info_ptr: *const UEFIBootInfo = undefined;
 var saved_stack_phys: u64 = undefined;
 var saved_stack_top: u64 = undefined;
 
-/// Main kernel initialization and run loop - Phase 1
+// Main kernel initialization and run loop - Phase 1
 pub fn kernelMain(boot_info: *const UEFIBootInfo) noreturn {
     // Set KASLR offset for address sanitization
     const info = runtime_info.getRuntimeInfo();
@@ -75,7 +77,7 @@ pub fn kernelMain(boot_info: *const UEFIBootInfo) noreturn {
     serial.flush();
 
     const stack_info = memory_init.initPhase1(boot_info) catch |err| {
-        serial.println("[KERNEL] Memory init phase 1 failed: {s}", .{@errorName(err)});
+        serial.println("[KERNEL] Memory init phase 1 failed: {s}", .{error_utils.errorToString(err)});
         serial.flush();
         @panic("Failed to initialize memory");
     };
@@ -95,31 +97,57 @@ pub fn kernelMain(boot_info: *const UEFIBootInfo) noreturn {
     );
 }
 
-/// Kernel initialization phase 2 - after stack switch
+// Kernel initialization phase 2 - after stack switch
 fn kernelMainPhase2() noreturn {
     // We're now on the new stack
     const boot_info = saved_boot_info_ptr;
 
     // Complete memory initialization
     memory_init.initPhase2(saved_stack_phys, saved_stack_top, boot_info) catch |err| {
-        serial.println("[KERNEL] Memory init phase 2 failed: {s}", .{@errorName(err)});
+        serial.println("[KERNEL] Memory init phase 2 failed: {s}", .{error_utils.errorToString(err)});
         serial.flush();
         @panic("Failed to complete memory initialization");
     };
+
+    // Reclaim boot services memory now that we're done with UEFI
+    serial.println("[KERNEL] Reclaiming UEFI boot services memory...", .{});
+
+    // Show memory stats before reclaim
+    const stats_before = pmm.getStats();
+    serial.println("[KERNEL] Memory before reclaim: {} MB free, {} MB reserved", .{
+        (stats_before.free_memory / (1024 * 1024)),
+        (stats_before.reserved_memory / (1024 * 1024)),
+    });
+
+    // Show reserved regions before reclaim
+    serial.println("[KERNEL] Reserved regions before reclaim:", .{});
+    pmm.printReservedRegions();
+
+    pmm.markBootServicesExited(boot_info);
+
+    // Show memory stats after reclaim
+    const stats_after = pmm.getStats();
+    serial.println("[KERNEL] Memory after reclaim: {} MB free, {} MB reserved", .{
+        (stats_after.free_memory / (1024 * 1024)),
+        (stats_after.reserved_memory / (1024 * 1024)),
+    });
+
+    const reclaimed_mb = (stats_after.free_memory - stats_before.free_memory) / (1024 * 1024);
+    serial.println("[KERNEL] Boot services memory reclaimed: {} MB", .{reclaimed_mb});
 
     serial.println("[KERNEL] Memory initialization complete", .{});
     serial.flush();
 
     // Initialize full security features
     security_init.initFull() catch |err| {
-        serial.println("[KERNEL] Full security init failed: {s}", .{@errorName(err)});
+        serial.println("[KERNEL] Full security init failed: {s}", .{error_utils.errorToString(err)});
         serial.flush();
         @panic("Failed to initialize full security");
     };
 
     // Initialize complete CPU features
     cpu_init.initComplete() catch |err| {
-        serial.println("[KERNEL] Complete CPU init failed: {s}", .{@errorName(err)});
+        serial.println("[KERNEL] Complete CPU init failed: {s}", .{error_utils.errorToString(err)});
         serial.flush();
     };
 

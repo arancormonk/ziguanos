@@ -1,7 +1,7 @@
 // Copyright 2025 arancormonk
 // SPDX-License-Identifier: MIT
 
-/// Shared data structures and constants for kernel loading
+// Shared data structures and constants for kernel loading
 const std = @import("std");
 const uefi = std.os.uefi;
 const boot_protocol = @import("shared");
@@ -13,7 +13,7 @@ pub const KASLRError = error{
     KASLRRequiredButFailed,
 };
 
-/// Per-segment KASLR info
+// Per-segment KASLR info
 pub const SegmentKASLR = struct {
     base_offset: u64, // Base KASLR offset for the kernel
     segment_offsets: [32]u64 = [_]u64{0} ** 32, // Additional per-segment offsets
@@ -21,7 +21,7 @@ pub const SegmentKASLR = struct {
     section_randomization_enabled: bool = false,
 };
 
-/// Boot entropy data to pass to kernel for enhanced security
+// Boot entropy data to pass to kernel for enhanced security
 pub const BootEntropyData = struct {
     entropy_bytes: [32]u8 = [_]u8{0} ** 32, // 256 bits of entropy
     quality: u8 = 0, // 0-100 quality score
@@ -30,7 +30,7 @@ pub const BootEntropyData = struct {
     collected: bool = false, // Whether entropy has been collected
 };
 
-/// Memory map descriptor information
+// Memory map descriptor information
 pub const MemoryMap = struct {
     descriptors: [*]uefi.tables.MemoryDescriptor,
     size: usize,
@@ -38,7 +38,7 @@ pub const MemoryMap = struct {
     descriptor_version: u32,
 };
 
-/// Allocated segment information for PIE support
+// Allocated segment information for PIE support
 pub const AllocatedSegment = struct {
     addr: u64 = 0,
     pages: u64 = 0,
@@ -50,7 +50,7 @@ pub const AllocatedSegment = struct {
     kaslr_offset: u64 = 0,
 };
 
-/// Allocated memory tracking for cleanup
+// Allocated memory tracking for cleanup
 pub const AllocatedMemory = struct {
     address: u64,
     size: u64,
@@ -59,7 +59,7 @@ pub const AllocatedMemory = struct {
     needs_cleanup: bool = true,
 };
 
-/// Main kernel information structure
+// Main kernel information structure
 pub const KernelInfo = struct {
     base_address: u64,
     entry_point: u64,
@@ -197,12 +197,12 @@ pub const R_X86_64_PC16 = 13;
 pub const R_X86_64_8 = 14;
 pub const R_X86_64_PC8 = 15;
 
-/// Extract symbol index from relocation info
+// Extract symbol index from relocation info
 pub fn ELF64_R_SYM(i: u64) u32 {
     return @as(u32, @truncate(i >> 32));
 }
 
-/// Extract relocation type from relocation info
+// Extract relocation type from relocation info
 pub fn ELF64_R_TYPE(i: u64) u32 {
     return @as(u32, @truncate(i));
 }

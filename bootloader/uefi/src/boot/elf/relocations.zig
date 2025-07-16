@@ -12,7 +12,7 @@ const kernel_types = @import("../kernel_types.zig");
 const memory = @import("../memory.zig");
 const serial = @import("../../drivers/serial.zig");
 
-/// Apply ELF relocations for KASLR with segment mapping support
+// Apply ELF relocations for KASLR with segment mapping support
 pub fn applyElfRelocationsWithMapping(
     elf_buffer: [*]u8,
     elf_header: *const kernel_types.Elf64Header,
@@ -86,7 +86,7 @@ pub fn applyElfRelocationsWithMapping(
     serial.print("[UEFI] PIE: Relocation processing completed\r\n", .{}) catch {};
 }
 
-/// Apply ELF relocations for KASLR - standard identity-mapped mode
+// Apply ELF relocations for KASLR - standard identity-mapped mode
 pub fn applyElfRelocations(
     elf_buffer: [*]u8,
     elf_header: *const kernel_types.Elf64Header,
@@ -107,7 +107,7 @@ pub fn applyElfRelocations(
     }
 }
 
-/// Apply relocations from a single section
+// Apply relocations from a single section
 pub fn applySectionRelocations(
     sh: *const kernel_types.Elf64SectionHeader,
     elf_buffer: [*]u8,
@@ -129,7 +129,7 @@ pub fn applySectionRelocations(
     }
 }
 
-/// Enhanced relocation processing with comprehensive bounds checking
+// Enhanced relocation processing with comprehensive bounds checking
 pub fn processRelocationSafe(
     rela: *const kernel_types.Elf64Rela,
     kaslr_offset: u64,
@@ -364,7 +364,7 @@ pub fn processRelocationSafe(
     }
 }
 
-/// Get size of relocation based on type
+// Get size of relocation based on type
 pub fn getRelocationSize(reloc_type: u32) !usize {
     return switch (reloc_type) {
         kernel_types.R_X86_64_NONE => 0,
@@ -377,7 +377,7 @@ pub fn getRelocationSize(reloc_type: u32) !usize {
     };
 }
 
-/// Get required alignment for relocation type
+// Get required alignment for relocation type
 pub fn getRelocationAlignment(reloc_type: u32) usize {
     return switch (reloc_type) {
         kernel_types.R_X86_64_64, kernel_types.R_X86_64_RELATIVE, kernel_types.R_X86_64_GLOB_DAT, kernel_types.R_X86_64_JUMP_SLOT => 8,

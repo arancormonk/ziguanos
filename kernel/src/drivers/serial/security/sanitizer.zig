@@ -28,7 +28,7 @@ inline fn sipRound(v0: *u64, v1: *u64, v2: *u64, v3: *u64) void {
     v2.* = std.math.rotl(u64, v2.*, 32);
 }
 
-/// Address sanitizer for KASLR protection
+// Address sanitizer for KASLR protection
 pub const AddressSanitizer = struct {
     kaslr_offset: u64,
     hash_key0: u64, // First 64-bit key for SipHash

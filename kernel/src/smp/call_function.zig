@@ -8,13 +8,13 @@ const spinlock = @import("../lib/spinlock.zig");
 const serial = @import("../drivers/serial.zig");
 const timer = @import("../x86_64/timer.zig");
 
-/// IPI vector for remote function calls
+// IPI vector for remote function calls
 pub const CALL_FUNCTION_VECTOR: u8 = 0xF2;
 
-/// Maximum number of pending function calls per CPU
+// Maximum number of pending function calls per CPU
 const MAX_PENDING_CALLS = 16;
 
-/// Function call request structure
+// Function call request structure
 pub const CallRequest = struct {
     func: *const fn () void,
     requester_cpu: u32,
@@ -22,7 +22,7 @@ pub const CallRequest = struct {
     has_error: bool,
 };
 
-/// Per-CPU function call queue
+// Per-CPU function call queue
 pub const CallQueue = struct {
     requests: [MAX_PENDING_CALLS]CallRequest,
     head: u32,
@@ -43,8 +43,8 @@ pub const CallQueue = struct {
         };
     }
 
-    /// Add a function call request to the queue
-    /// Returns a pointer to the enqueued request
+    // Add a function call request to the queue
+    // Returns a pointer to the enqueued request
     pub fn enqueue(self: *CallQueue, request: CallRequest) !*CallRequest {
         const guard = self.lock.acquire();
         defer _ = guard;
@@ -60,7 +60,7 @@ pub const CallQueue = struct {
         return request_ptr;
     }
 
-    /// Get the next function call request
+    // Get the next function call request
     pub fn dequeue(self: *CallQueue) ?*CallRequest {
         const guard = self.lock.acquire();
         defer _ = guard;
@@ -75,10 +75,10 @@ pub const CallQueue = struct {
     }
 };
 
-/// Per-CPU call queues
+// Per-CPU call queues
 var call_queues: [per_cpu.MAX_CPUS]CallQueue = [_]CallQueue{CallQueue.init()} ** per_cpu.MAX_CPUS;
 
-/// Statistics for function calls
+// Statistics for function calls
 pub var stats = struct {
     calls_sent: u64 = 0,
     calls_completed: u64 = 0,
@@ -86,7 +86,7 @@ pub var stats = struct {
     timeouts: u64 = 0,
 }{};
 
-/// Initialize the call function infrastructure
+// Initialize the call function infrastructure
 pub fn init() void {
     // Reset all queues
     for (&call_queues) |*queue| {
@@ -96,7 +96,7 @@ pub fn init() void {
     serial.println("[IPI] Call function infrastructure initialized", .{});
 }
 
-/// Call a function on a specific CPU
+// Call a function on a specific CPU
 pub fn callFunctionSingle(cpu_id: u32, func: *const fn () void) !void {
     // Validate CPU ID
     if (cpu_id >= per_cpu.getCpuCount()) {
@@ -162,7 +162,7 @@ pub fn callFunctionSingle(cpu_id: u32, func: *const fn () void) !void {
     _ = @atomicRmw(u64, &stats.calls_completed, .Add, 1, .monotonic);
 }
 
-/// Call a function on all CPUs except the current one
+// Call a function on all CPUs except the current one
 pub fn callFunctionAll(func: *const fn () void) !void {
     const current_cpu = per_cpu.getCurrentCpuId();
     const cpu_count = per_cpu.getCpuCount();
@@ -241,7 +241,7 @@ pub fn callFunctionAll(func: *const fn () void) !void {
     }
 }
 
-/// Process pending function calls on the current CPU
+// Process pending function calls on the current CPU
 pub fn processPendingCalls() void {
     const cpu_id = per_cpu.getCurrentCpuId();
     var queue = &call_queues[cpu_id];
@@ -271,7 +271,7 @@ pub fn processPendingCalls() void {
     }
 }
 
-/// Get call function statistics
+// Get call function statistics
 pub fn getStats() @TypeOf(stats) {
     return .{
         .calls_sent = @atomicLoad(u64, &stats.calls_sent, .monotonic),

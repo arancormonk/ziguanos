@@ -6,6 +6,7 @@ const serial = @import("../../drivers/serial.zig");
 const secure_print = @import("../../lib/secure_print.zig");
 const pmm = @import("../../memory/pmm.zig");
 const constants = @import("constants.zig");
+const error_utils = @import("../../lib/error_utils.zig");
 
 // Type for the unmap function that will be provided by main paging module
 pub const UnmapPageFn = fn (virt_addr: u64) anyerror!void;
@@ -33,7 +34,7 @@ pub fn addGuardPagesAroundVirtualRegion(start: u64, size: u64, createGuardPageAt
         const guard_before = (start - constants.PAGE_SIZE_4K) & ~(constants.PAGE_SIZE_4K - 1);
         createGuardPageAtFn(guard_before) catch |err| {
             serial.print("[PAGING] Warning: Could not create guard page before region: ", .{});
-            serial.println("{s}", .{@errorName(err)});
+            serial.println("{s}", .{error_utils.errorToString(err)});
         };
     }
 
@@ -42,6 +43,6 @@ pub fn addGuardPagesAroundVirtualRegion(start: u64, size: u64, createGuardPageAt
     const guard_after = (end + constants.PAGE_SIZE_4K - 1) & ~(constants.PAGE_SIZE_4K - 1);
     createGuardPageAtFn(guard_after) catch |err| {
         serial.print("[PAGING] Warning: Could not create guard page after region: ", .{});
-        serial.println("{s}", .{@errorName(err)});
+        serial.println("{s}", .{error_utils.errorToString(err)});
     };
 }

@@ -6,7 +6,7 @@ const per_cpu = @import("../per_cpu.zig");
 const cpu_local = @import("../cpu_local.zig");
 const serial = @import("../../drivers/serial.zig");
 
-/// Test per-CPU infrastructure functionality
+// Test per-CPU infrastructure functionality
 pub fn testPerCpuInfrastructure() !void {
     serial.println("[SMP TEST] Starting per-CPU infrastructure tests...", .{});
 

@@ -7,7 +7,7 @@ const per_cpu_tests = @import("per_cpu_tests.zig");
 const ap_debug_tests = @import("ap_debug_tests.zig");
 const serial = @import("../../drivers/serial.zig");
 
-/// Run all SMP tests
+// Run all SMP tests
 pub fn runAllTests() !void {
     serial.println("\n========== SMP Test Suite ==========", .{});
 
@@ -26,22 +26,22 @@ pub fn runAllTests() !void {
     serial.println("\n========== SMP Test Suite Complete ==========", .{});
 }
 
-/// Run only functional tests
+// Run only functional tests
 pub fn runFunctionalTests() !void {
     try functional_tests.runAll();
 }
 
-/// Run per-CPU infrastructure tests
+// Run per-CPU infrastructure tests
 pub fn runPerCpuTests() !void {
     try per_cpu_tests.testPerCpuInfrastructure();
 }
 
-/// Run AP debug tests
+// Run AP debug tests
 pub fn runApDebugTests() !void {
     try ap_debug_tests.testApDebug();
 }
 
-/// Individual test exports for direct calling
+// Individual test exports for direct calling
 pub const testApStartup = functional_tests.testApStartup;
 pub const testPerCpuData = functional_tests.testPerCpuData;
 pub const testIpi = functional_tests.testIpi;

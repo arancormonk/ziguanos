@@ -15,6 +15,7 @@ const apic = @import("apic.zig");
 const cpuid = @import("cpuid.zig");
 const cfi_exception = @import("cfi_exception.zig");
 const cpu_init = @import("cpu_init.zig");
+const error_utils = @import("../lib/error_utils.zig");
 
 // Extended interrupt frame with saved state
 pub const ExtendedInterruptFrame = extern struct {
@@ -175,7 +176,7 @@ export fn handleExceptionEnhanced(vector: u64, error_code: u64, context: *Extend
 
     // Validate privilege transition
     interrupt_security.validatePrivilegeTransition(&int_context) catch |err| {
-        serial.println("[EXCEPTION] Security violation: {s}", .{@errorName(err)});
+        serial.println("[EXCEPTION] Security violation: {s}", .{error_utils.errorToString(err)});
         // Log security event but continue handling
     };
 
@@ -201,7 +202,7 @@ export fn handleExceptionEnhanced(vector: u64, error_code: u64, context: *Extend
 
     // Handle specific exceptions
     handleSpecificException(&int_context) catch |err| {
-        serial.println("[EXCEPTION] Handler failed: {s}", .{@errorName(err)});
+        serial.println("[EXCEPTION] Handler failed: {s}", .{error_utils.errorToString(err)});
     };
 
     // Clean up IST stack if used

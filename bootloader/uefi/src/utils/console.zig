@@ -5,7 +5,7 @@ const std = @import("std");
 const uefi = std.os.uefi;
 const uefi_globals = @import("uefi_globals.zig");
 
-/// Helper to create wide string literals
+// Helper to create wide string literals
 pub fn L(comptime str: []const u8) *const [str.len + 1:0]u16 {
     const result = comptime blk: {
         var r: [str.len + 1:0]u16 = undefined;
@@ -18,7 +18,7 @@ pub fn L(comptime str: []const u8) *const [str.len + 1:0]u16 {
     return &result;
 }
 
-/// Clear screen and print the bootloader banner
+// Clear screen and print the bootloader banner
 pub fn printBanner() void {
     const con_out = uefi_globals.system_table.con_out.?;
 
@@ -28,7 +28,7 @@ pub fn printBanner() void {
     _ = con_out.outputString(L("\r\n=============================\r\n\r\n"));
 }
 
-/// Print system information
+// Print system information
 pub fn printSystemInfo() void {
     const con_out = uefi_globals.system_table.con_out.?;
 
@@ -37,7 +37,7 @@ pub fn printSystemInfo() void {
     _ = con_out.outputString(L("\r\n"));
 }
 
-/// Print secure boot status
+// Print secure boot status
 pub fn printSecureBootStatus(secure_boot_enabled: bool) void {
     const con_out = uefi_globals.system_table.con_out.?;
 
@@ -50,20 +50,20 @@ pub fn printSecureBootStatus(secure_boot_enabled: bool) void {
     _ = con_out.outputString(L("\r\n"));
 }
 
-/// Print a simple message
+// Print a simple message
 pub fn print(comptime message: []const u8) void {
     const con_out = uefi_globals.system_table.con_out.?;
     _ = con_out.outputString(L(message));
 }
 
-/// Print a message with newline
+// Print a message with newline
 pub fn println(comptime message: []const u8) void {
     const con_out = uefi_globals.system_table.con_out.?;
     _ = con_out.outputString(L(message));
     _ = con_out.outputString(L("\r\n"));
 }
 
-/// Wait for user to press a key
+// Wait for user to press a key
 pub fn waitForKeypress() void {
     const con_in = uefi_globals.system_table.con_in.?;
     var key: uefi.protocol.SimpleTextInput.Key.Input = undefined;

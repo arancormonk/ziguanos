@@ -13,7 +13,7 @@ const regs = @import("../hal/registers.zig");
 const config = @import("config.zig");
 const spinlock = @import("../../../lib/spinlock.zig");
 
-/// Driver initialization phases
+// Driver initialization phases
 pub const Phase = enum {
     uninitialized,
     early_boot,
@@ -22,7 +22,7 @@ pub const Phase = enum {
     fully_initialized,
 };
 
-/// Serial port state
+// Serial port state
 pub const SerialPort = struct {
     base_port: u16,
     config: config.SerialConfig,
@@ -71,7 +71,7 @@ pub const SerialPort = struct {
     }
 };
 
-/// Main driver state
+// Main driver state
 pub const Driver = struct {
     phase: Phase,
     primary_port: SerialPort,
@@ -201,18 +201,18 @@ pub const Driver = struct {
     }
 };
 
-/// Global driver instance
+// Global driver instance
 var global_driver: Driver = undefined;
 var driver_initialized: bool = false;
 
-/// Initialize the global driver instance
+// Initialize the global driver instance
 pub fn initGlobal() void {
     if (driver_initialized) return;
     global_driver = Driver.init();
     driver_initialized = true;
 }
 
-/// Get the global driver instance
+// Get the global driver instance
 pub fn getGlobal() *Driver {
     if (!driver_initialized) {
         initGlobal();

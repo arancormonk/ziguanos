@@ -7,7 +7,7 @@ const stack_canary_test = @import("../x86_64/tests/stack_canary_test.zig");
 const vmm = @import("../memory/vmm.zig");
 const exception_validation_test = @import("../tests/exception_validation_test.zig");
 
-/// Run all diagnostic tests
+// Run all diagnostic tests
 pub fn runAllTests() void {
     // Test the improved canary implementation
     stack_canary_test.runAllTests();
@@ -25,7 +25,7 @@ pub fn runAllTests() void {
     exception_validation_test.printSecurityStats();
 }
 
-/// Test serial driver
+// Test serial driver
 fn testSerial() void {
     serial.println("[KERNEL] Testing serial driver...", .{});
 
@@ -42,7 +42,7 @@ fn testSerial() void {
     serial.println("[KERNEL] Serial driver tests complete", .{});
 }
 
-/// Test virtual memory manager
+// Test virtual memory manager
 fn testVMM() void {
     serial.println("[KERNEL] Testing virtual memory manager...", .{});
     vmm.runTests();

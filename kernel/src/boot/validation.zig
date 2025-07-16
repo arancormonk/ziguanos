@@ -12,8 +12,8 @@ const UEFIBootInfo = uefi_boot.UEFIBootInfo;
 // Boot magic constant
 const BOOT_MAGIC = 0x5A49475541524E53; // "ZIGUANOS"
 
-/// Validates the boot info structure passed from bootloader
-/// Must be done before ANY use of boot info
+// Validates the boot info structure passed from bootloader
+// Must be done before ANY use of boot info
 pub fn validateBootInfo(info: *const UEFIBootInfo) !void {
     // Check magic immediately
     if (info.magic != BOOT_MAGIC) {

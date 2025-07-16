@@ -1,7 +1,7 @@
 // Copyright 2025 arancormonk
 // SPDX-License-Identifier: MIT
 
-/// Hardware RNG and system entropy collection utilities
+// Hardware RNG and system entropy collection utilities
 const std = @import("std");
 const uefi = std.os.uefi;
 const serial = @import("../../drivers/serial.zig");
@@ -34,7 +34,7 @@ var rng_retry_config: RngRetryConfig = .{
     .rdseed_max_retries = RngRetryConfig.DEFAULT_RDSEED_RETRIES,
 };
 
-/// Load RNG retry configuration from UEFI variable cache
+// Load RNG retry configuration from UEFI variable cache
 pub fn loadRngRetryConfig(runtime_services: *uefi.tables.RuntimeServices) void {
     // Initialize cache if not already done
     if (!variable_cache.isInitialized()) {
@@ -66,7 +66,7 @@ pub fn loadRngRetryConfig(runtime_services: *uefi.tables.RuntimeServices) void {
     }
 }
 
-/// Check if CPU supports RDRAND instruction
+// Check if CPU supports RDRAND instruction
 pub fn cpuHasRdrand() bool {
     // Check CPUID leaf 1, ECX bit 30 for RDRAND support
     var eax: u32 = 1;
@@ -84,7 +84,7 @@ pub fn cpuHasRdrand() bool {
     return (ecx & (1 << 30)) != 0;
 }
 
-/// Check if CPU supports RDSEED instruction
+// Check if CPU supports RDSEED instruction
 pub fn cpuHasRdseed() bool {
     // Check CPUID leaf 7, EBX bit 18 for RDSEED support
     var eax: u32 = 7;
@@ -102,7 +102,7 @@ pub fn cpuHasRdseed() bool {
     return (ebx & (1 << 18)) != 0;
 }
 
-/// Check if we're running under hypervisor
+// Check if we're running under hypervisor
 fn isVirtualized() bool {
     var eax: u32 = 1;
     var ebx: u32 = undefined;
@@ -119,8 +119,8 @@ fn isVirtualized() bool {
     return (ecx & (1 << 31)) != 0;
 }
 
-/// Try to get random value using RDRAND instruction (constant-time)
-/// Follows Intel DRNG Software Implementation Guide recommendations
+// Try to get random value using RDRAND instruction (constant-time)
+// Follows Intel DRNG Software Implementation Guide recommendations
 pub fn tryRdrand() ?u64 {
     if (!cpuHasRdrand()) return null;
 
@@ -168,8 +168,8 @@ pub fn tryRdrand() ?u64 {
     return if (any_success != 0) result else null;
 }
 
-/// Try to get random value using RDSEED instruction (constant-time)
-/// Follows Intel DRNG Software Implementation Guide recommendations
+// Try to get random value using RDSEED instruction (constant-time)
+// Follows Intel DRNG Software Implementation Guide recommendations
 pub fn tryRdseed() ?u64 {
     if (!cpuHasRdseed()) return null;
 
@@ -218,7 +218,7 @@ pub fn tryRdseed() ?u64 {
     return if (any_success != 0) result else null;
 }
 
-/// Read current TSC value
+// Read current TSC value
 pub fn readTsc() u64 {
     var low: u32 = undefined;
     var high: u32 = undefined;
@@ -231,12 +231,12 @@ pub fn readTsc() u64 {
     return (@as(u64, high) << 32) | low;
 }
 
-/// Rotate left helper function specifically for u64
+// Rotate left helper function specifically for u64
 fn rotl64(value: u64, shift: u6) u64 {
     return (value << shift) | (value >> @as(u6, @intCast(64 - @as(u7, shift))));
 }
 
-/// Get entropy from ACPI tables (Intel-recommended)
+// Get entropy from ACPI tables (Intel-recommended)
 pub fn getAcpiEntropy() u64 {
     var entropy: u64 = 0;
 
@@ -292,7 +292,7 @@ pub fn getAcpiEntropy() u64 {
     return entropy;
 }
 
-/// Get entropy from PIT timer (Intel-recommended)
+// Get entropy from PIT timer (Intel-recommended)
 pub fn getPitEntropy() u64 {
     var entropy: u64 = 0;
 
@@ -324,7 +324,7 @@ pub fn getPitEntropy() u64 {
     return entropy;
 }
 
-/// Get entropy from memory layout (Intel-recommended)
+// Get entropy from memory layout (Intel-recommended)
 pub fn getMemoryLayoutEntropy(boot_services: *uefi.tables.BootServices) u64 {
     var entropy: u64 = 0;
     var memory_map_size: usize = 0;
@@ -362,7 +362,7 @@ pub fn getMemoryLayoutEntropy(boot_services: *uefi.tables.BootServices) u64 {
     return entropy;
 }
 
-/// Read CMOS/RTC time for additional entropy
+// Read CMOS/RTC time for additional entropy
 pub fn readCmosTime() u64 {
     // Read various CMOS registers for entropy
     var entropy: u64 = 0;
@@ -421,7 +421,7 @@ pub fn readCmosTime() u64 {
     return entropy;
 }
 
-/// Read CPU performance counters for entropy
+// Read CPU performance counters for entropy
 pub fn readPerfCounters() u64 {
     // SECURITY: Following Intel x86-64 security best practices for entropy collection
     // This function collects timing-based entropy from multiple TSC reads

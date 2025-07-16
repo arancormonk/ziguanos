@@ -6,7 +6,7 @@ const per_cpu = @import("../per_cpu.zig");
 const ap_debug = @import("../ap_debug.zig");
 const serial = @import("../../drivers/serial.zig");
 
-/// Test AP debug functionality
+// Test AP debug functionality
 pub fn testApDebug() !void {
     serial.println("[SMP TEST] Starting AP debug tests...", .{});
 

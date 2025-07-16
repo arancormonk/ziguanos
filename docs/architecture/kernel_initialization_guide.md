@@ -91,7 +91,7 @@ The kernel initialization follows a precise order using a modular system. Each m
 
 ### Phase 1: Assembly Entry Point
 
-**Location:** `kernel/src/boot/entry.S`  
+**Location:** `kernel/src/boot/entry.S`
 **Purpose:** Capture boot info pointer in PIE-compatible way
 
 1. **Interrupt Disable** (`entry.S:14`)
@@ -106,7 +106,7 @@ The kernel initialization follows a precise order using a modular system. Each m
 
 ### Phase 2: Early Boot and Validation
 
-**Location:** `kernel/src/boot/entry.zig:29-89`  
+**Location:** `kernel/src/boot/entry.zig:29-89`
 **Purpose:** Establish minimal safe environment and validate boot info
 
 1. **Initial Setup** (`entry.zig:31-36`)
@@ -139,7 +139,7 @@ The kernel initialization follows a precise order using a modular system. Each m
 
 ### Phase 3: Boot Mode Handling
 
-**Location:** `kernel/src/boot/mode_handler.zig`  
+**Location:** `kernel/src/boot/mode_handler.zig`
 **Purpose:** Handle PIE (Position Independent Executable) vs normal boot
 
 1. **PIE Mode Handler** (`mode_handler.zig:20-44`)
@@ -161,10 +161,11 @@ The kernel initialization follows a precise order using a modular system. Each m
 
 ### Phase 4: Global Descriptor Table (GDT)
 
-**Location:** `kernel/src/x86_64/gdt.zig`  
+**Location:** `kernel/src/x86_64/gdt.zig`
 **Purpose:** Establish kernel-controlled segmentation
 
 The GDT is set up differently based on boot mode:
+
 - PIE mode: `gdt.initEarly()` in mode handler
 - Normal mode: `gdt.init()` in mode handler
 
@@ -189,7 +190,7 @@ The GDT is set up differently based on boot mode:
 
 ### Phase 5: Kernel Main Entry
 
-**Location:** `kernel/src/main.zig:31-96`  
+**Location:** `kernel/src/main.zig:31-96`
 **Purpose:** Main kernel initialization phase 1 (before stack switch)
 
 1. **Initial Setup** (`main.zig:32-55`)
@@ -223,7 +224,7 @@ The GDT is set up differently based on boot mode:
 
 ### Phase 6: Kernel Main Phase 2
 
-**Location:** `kernel/src/main.zig:99-194`  
+**Location:** `kernel/src/main.zig:99-194`
 **Purpose:** Main kernel initialization phase 2 (after stack switch)
 
 1. **Memory Phase 2** (`main.zig:104-108`)
@@ -340,10 +341,11 @@ The kernel uses a modular initialization system with dedicated modules for each 
 
 ### Memory Initialization Module (`init/memory.zig`)
 
-**Purpose:** Two-phase memory subsystem initialization
+**Purpose:** Memory subsystem initialization
 
 1. **Phase 1** (`memory.zig:20-52`)
    - Initializes paging with W^X enforcement
+   - Uses bootloader-allocated page tables
    - Sets up physical memory manager (PMM)
    - Allocates 128KB kernel stack
    - Returns stack info for phase 2
@@ -352,6 +354,7 @@ The kernel uses a modular initialization system with dedicated modules for each 
    - Updates stack security with new stack
    - Initializes virtual memory manager (VMM)
    - Sets up kernel heap
+   - Reclaims boot services memory
    - Configures slab allocators
 
 3. **Testing** (`memory.zig:78-89`)

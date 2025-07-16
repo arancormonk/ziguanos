@@ -1,13 +1,13 @@
 // Copyright 2025 arancormonk
 // SPDX-License-Identifier: MIT
 
-//! ACPI table validation utilities
+// ACPI table validation utilities
 
 const std = @import("std");
 const tables = @import("tables.zig");
 
-/// Calculate 8-bit checksum for ACPI tables
-/// The sum of all bytes should equal 0 for a valid table
+// Calculate 8-bit checksum for ACPI tables
+// The sum of all bytes should equal 0 for a valid table
 pub fn calculate8(bytes: []const u8) u8 {
     var sum: u8 = 0;
     for (bytes) |byte| {
@@ -16,14 +16,14 @@ pub fn calculate8(bytes: []const u8) u8 {
     return sum;
 }
 
-/// Validate checksum for a buffer
+// Validate checksum for a buffer
 pub fn validate(bytes: []const u8) tables.Error!void {
     if (calculate8(bytes) != 0) {
         return tables.Error.InvalidChecksum;
     }
 }
 
-/// Validate an ACPI table header and its checksum
+// Validate an ACPI table header and its checksum
 pub fn validateTable(header: *const tables.Header) tables.Error!void {
     // Ensure we don't read beyond the table
     if (header.length < @sizeOf(tables.Header)) {
@@ -34,7 +34,7 @@ pub fn validateTable(header: *const tables.Header) tables.Error!void {
     try validate(bytes);
 }
 
-/// Update checksum field in a table
+// Update checksum field in a table
 pub fn updateTableChecksum(header: *tables.Header) void {
     // Zero the checksum field first
     header.checksum = 0;

@@ -7,17 +7,17 @@ const serial = @import("../../drivers/serial.zig");
 const ap_init = @import("../ap_init.zig");
 const per_cpu = @import("../per_cpu.zig");
 
-/// Test coordinator for SMP tests
+// Test coordinator for SMP tests
 pub const TestCoordinator = struct {
     processor_info: ?[]const per_cpu.ProcessorInfo = null,
     aps_started: bool = false,
 
-    /// Initialize test coordinator
+    // Initialize test coordinator
     pub fn init() TestCoordinator {
         return .{};
     }
 
-    /// Get processor information from ACPI
+    // Get processor information from ACPI
     pub fn getProcessorInfo(self: *TestCoordinator) ![]const per_cpu.ProcessorInfo {
         if (self.processor_info) |info| {
             return info;
@@ -39,7 +39,7 @@ pub const TestCoordinator = struct {
         return topology.processors;
     }
 
-    /// Start all APs if not already started
+    // Start all APs if not already started
     pub fn ensureAPsStarted(self: *TestCoordinator) !void {
         if (self.aps_started) {
             return;
@@ -66,12 +66,12 @@ pub const TestCoordinator = struct {
         self.aps_started = true;
     }
 
-    /// Get CPU count
+    // Get CPU count
     pub fn getCpuCount(self: *TestCoordinator) u32 {
         _ = self;
         return per_cpu.getCpuCount();
     }
 };
 
-/// Global test coordinator instance
+// Global test coordinator instance
 pub var coordinator = TestCoordinator.init();

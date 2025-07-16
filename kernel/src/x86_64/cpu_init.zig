@@ -5,6 +5,7 @@ const std = @import("std");
 const cpuid = @import("cpuid.zig");
 const speculation = @import("speculation.zig");
 const secure_print = @import("../lib/secure_print.zig");
+const error_utils = @import("../lib/error_utils.zig");
 
 // MSR addresses
 pub const IA32_EFER: u32 = 0xC0000080;
@@ -319,7 +320,7 @@ pub fn initializeCETComplete() !void {
                 paging.mapShadowStackPage(page_addr, page_addr) catch |err| {
                     serial.print("[CET] ERROR: Failed to map shadow stack page at ", .{});
                     secure_print.printHex("", page_addr);
-                    serial.println(": {s}", .{@errorName(err)});
+                    serial.println(": {s}", .{error_utils.errorToString(err)});
                     // Clean up allocated pages on failure
                     pmm.freePages(shadow_stack_phys, shadow_stack_pages);
                     s_cet &= ~(CET_SHSTK_EN | CET_WR_SHSTK_EN);
@@ -432,7 +433,7 @@ fn testShadowStackOperations() void {
         const test_token = ShadowStackToken.createSupervisor(original_ssp);
 
         pushShadowStackToken(test_token) catch |err| {
-            serial.println("[CET] ERROR: Failed to push token: {s}", .{@errorName(err)});
+            serial.println("[CET] ERROR: Failed to push token: {s}", .{error_utils.errorToString(err)});
             return;
         };
 
@@ -442,7 +443,7 @@ fn testShadowStackOperations() void {
         }
 
         const popped_token = popShadowStackToken() catch |err| {
-            serial.println("[CET] ERROR: Failed to pop token: {s}", .{@errorName(err)});
+            serial.println("[CET] ERROR: Failed to pop token: {s}", .{error_utils.errorToString(err)});
             return;
         };
 
@@ -479,7 +480,7 @@ fn testShadowStackOperations() void {
     // Test 3: Shadow stack state save/restore
     {
         const saved_state = saveShadowStackState() catch |err| {
-            serial.println("[CET] ERROR: Failed to save shadow stack state: {s}", .{@errorName(err)});
+            serial.println("[CET] ERROR: Failed to save shadow stack state: {s}", .{error_utils.errorToString(err)});
             return;
         };
 
@@ -489,7 +490,7 @@ fn testShadowStackOperations() void {
 
         // Restore state
         restoreShadowStackState(saved_state) catch |err| {
-            serial.println("[CET] ERROR: Failed to restore shadow stack state: {s}", .{@errorName(err)});
+            serial.println("[CET] ERROR: Failed to restore shadow stack state: {s}", .{error_utils.errorToString(err)});
             return;
         };
 
@@ -521,7 +522,7 @@ pub fn verifyShadowStackPages() void {
 
     // Get page table entry for shadow stack
     const pte = paging.getPageTableEntry(ssp) catch |err| {
-        serial.println("[CET] ERROR: Failed to get PTE for shadow stack: {s}", .{@errorName(err)});
+        serial.println("[CET] ERROR: Failed to get PTE for shadow stack: {s}", .{error_utils.errorToString(err)});
         return;
     };
 

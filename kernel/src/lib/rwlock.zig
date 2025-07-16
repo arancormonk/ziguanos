@@ -1,29 +1,29 @@
 // Copyright 2025 arancormonk
 // SPDX-License-Identifier: MIT
 
-//! Read-Write Lock implementation for kernel synchronization
-//! Allows multiple concurrent readers or a single exclusive writer
+// Read-Write Lock implementation for kernel synchronization
+// Allows multiple concurrent readers or a single exclusive writer
 
 const std = @import("std");
 const barriers = @import("barriers.zig");
 const interrupts = @import("../x86_64/interrupts.zig");
 
-/// Read-Write Lock structure
-/// Uses a single atomic counter:
-/// - 0: Unlocked
-/// - >0: Number of active readers
-/// - <0: Writer active (WRITER_ACTIVE)
+// Read-Write Lock structure
+// Uses a single atomic counter:
+// - 0: Unlocked
+// - >0: Number of active readers
+// - <0: Writer active (WRITER_ACTIVE)
 pub const RwLock = struct {
-    /// The lock state counter
+    // The lock state counter
     state: i32 = 0,
 
-    /// Special value indicating a writer is active
+    // Special value indicating a writer is active
     const WRITER_ACTIVE: i32 = -1;
 
-    /// Maximum number of concurrent readers (prevent overflow)
+    // Maximum number of concurrent readers (prevent overflow)
     const MAX_READERS: i32 = 0x7FFFFFFF - 1;
 
-    /// Reader lock guard - automatically releases on scope exit
+    // Reader lock guard - automatically releases on scope exit
     pub const ReaderGuard = struct {
         lock: *RwLock,
 
@@ -32,7 +32,7 @@ pub const RwLock = struct {
         }
     };
 
-    /// Writer lock guard - automatically releases on scope exit
+    // Writer lock guard - automatically releases on scope exit
     pub const WriterGuard = struct {
         lock: *RwLock,
         saved_flags: u64,
@@ -42,13 +42,13 @@ pub const RwLock = struct {
         }
     };
 
-    /// Initialize a new read-write lock
+    // Initialize a new read-write lock
     pub fn init() RwLock {
         return .{ .state = 0 };
     }
 
-    /// Acquire a read lock
-    /// Multiple readers can hold the lock simultaneously
+    // Acquire a read lock
+    // Multiple readers can hold the lock simultaneously
     pub fn readLock(self: *RwLock) void {
         while (true) {
             const current = @atomicLoad(i32, &self.state, .acquire);
@@ -83,8 +83,8 @@ pub const RwLock = struct {
         }
     }
 
-    /// Try to acquire a read lock without blocking
-    /// Returns true if successful, false if would block
+    // Try to acquire a read lock without blocking
+    // Returns true if successful, false if would block
     pub fn tryReadLock(self: *RwLock) bool {
         const current = @atomicLoad(i32, &self.state, .acquire);
 
@@ -104,14 +104,14 @@ pub const RwLock = struct {
         ) == null;
     }
 
-    /// Release a read lock
+    // Release a read lock
     pub fn readUnlock(self: *RwLock) void {
         const prev = @atomicRmw(i32, &self.state, .Sub, 1, .release);
         std.debug.assert(prev > 0); // Must have been a reader
     }
 
-    /// Acquire a write lock
-    /// Exclusive access - waits for all readers to finish
+    // Acquire a write lock
+    // Exclusive access - waits for all readers to finish
     pub fn writeLock(self: *RwLock) u64 {
         // Disable interrupts for exclusive access
         const saved_flags = interrupts.disable();
@@ -140,8 +140,8 @@ pub const RwLock = struct {
         }
     }
 
-    /// Try to acquire a write lock without blocking
-    /// Returns saved interrupt flags if successful, null if would block
+    // Try to acquire a write lock without blocking
+    // Returns saved interrupt flags if successful, null if would block
     pub fn tryWriteLock(self: *RwLock) ?u64 {
         const saved_flags = interrupts.disable();
 
@@ -163,7 +163,7 @@ pub const RwLock = struct {
         return null;
     }
 
-    /// Release a write lock
+    // Release a write lock
     pub fn writeUnlock(self: *RwLock, saved_flags: u64) void {
         const prev = @atomicRmw(i32, &self.state, .Xchg, 0, .release);
         std.debug.assert(prev == WRITER_ACTIVE); // Must have been the writer
@@ -172,36 +172,36 @@ pub const RwLock = struct {
         interrupts.restore(saved_flags);
     }
 
-    /// Acquire a read lock with guard
+    // Acquire a read lock with guard
     pub fn acquireRead(self: *RwLock) ReaderGuard {
         self.readLock();
         return .{ .lock = self };
     }
 
-    /// Acquire a write lock with guard
+    // Acquire a write lock with guard
     pub fn acquireWrite(self: *RwLock) WriterGuard {
         const saved_flags = self.writeLock();
         return .{ .lock = self, .saved_flags = saved_flags };
     }
 
-    /// Check if the lock is currently held by any reader or writer
+    // Check if the lock is currently held by any reader or writer
     pub fn isLocked(self: *const RwLock) bool {
         return @atomicLoad(i32, &self.state, .acquire) != 0;
     }
 
-    /// Check if the lock is currently held by a writer
+    // Check if the lock is currently held by a writer
     pub fn isWriteLocked(self: *const RwLock) bool {
         return @atomicLoad(i32, &self.state, .acquire) < 0;
     }
 
-    /// Get the current number of readers (0 if writer active)
+    // Get the current number of readers (0 if writer active)
     pub fn getReaderCount(self: *const RwLock) u32 {
         const state = @atomicLoad(i32, &self.state, .acquire);
         return if (state > 0) @intCast(state) else 0;
     }
 
-    /// Downgrade a write lock to a read lock
-    /// Must be called while holding the write lock
+    // Downgrade a write lock to a read lock
+    // Must be called while holding the write lock
     pub fn downgrade(self: *RwLock) void {
         const prev = @atomicRmw(i32, &self.state, .Xchg, 1, .acq_rel);
         std.debug.assert(prev == WRITER_ACTIVE); // Must have been the writer
@@ -209,9 +209,9 @@ pub const RwLock = struct {
     }
 };
 
-/// Test utilities
+// Test utilities
 pub const testing = struct {
-    /// Basic functionality test
+    // Basic functionality test
     pub fn testBasicRwLock() !void {
         var lock = RwLock.init();
 
@@ -244,7 +244,7 @@ pub const testing = struct {
         try std.testing.expect(!lock.isLocked());
     }
 
-    /// Test try-lock operations
+    // Test try-lock operations
     pub fn testTryLock() !void {
         var lock = RwLock.init();
 

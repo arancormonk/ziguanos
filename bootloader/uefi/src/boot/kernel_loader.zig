@@ -15,6 +15,8 @@ const kaslr_config = @import("kaslr/config.zig");
 const kaslr_generator = @import("kaslr/generator.zig");
 const elf_loader = @import("elf/loader.zig");
 const vmm = @import("vmm.zig");
+const page_table_calculator = @import("page_table_calculator.zig");
+const page_table_allocator = @import("page_table_allocator.zig");
 
 // Re-export types for public API compatibility
 pub const KernelInfo = kernel_types.KernelInfo;
@@ -151,7 +153,8 @@ pub fn jumpToKernel(kernel_info: KernelInfo, memory_map: MemoryMap) noreturn {
         .entropy_sources = boot_info.entropy_sources,
         .has_hardware_rng = boot_info.has_hardware_rng,
         ._padding3 = [_]u8{0} ** 5,
-        .reserved = [_]u64{0} ** 24,
+        .page_table_info = boot_info.page_table_info, // Will be set by coordinator
+        .reserved = [_]u64{0} ** 21,
     };
 
     // Debug: Print boot info address and magic

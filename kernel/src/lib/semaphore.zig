@@ -1,24 +1,24 @@
 // Copyright 2025 arancormonk
 // SPDX-License-Identifier: MIT
 
-//! Counting semaphore implementation for kernel synchronization
-//! Allows controlled access to a resource with a specified count
+// Counting semaphore implementation for kernel synchronization
+// Allows controlled access to a resource with a specified count
 
 const std = @import("std");
 const barriers = @import("barriers.zig");
 const spinlock = @import("spinlock.zig");
 const interrupts = @import("../x86_64/interrupts.zig");
 
-/// Counting semaphore structure
+// Counting semaphore structure
 pub const Semaphore = struct {
-    /// Current count of available resources
+    // Current count of available resources
     count: i32,
-    /// Maximum count (for bounded semaphores)
+    // Maximum count (for bounded semaphores)
     max_count: i32,
-    /// Lock protecting the count
+    // Lock protecting the count
     lock: spinlock.SpinLock,
 
-    /// Semaphore guard - automatically releases on scope exit
+    // Semaphore guard - automatically releases on scope exit
     pub const Guard = struct {
         sem: *Semaphore,
 
@@ -27,7 +27,7 @@ pub const Semaphore = struct {
         }
     };
 
-    /// Initialize a new semaphore with given initial and maximum count
+    // Initialize a new semaphore with given initial and maximum count
     pub fn init(initial_count: i32, max_count: i32) Semaphore {
         std.debug.assert(initial_count >= 0);
         std.debug.assert(max_count > 0);
@@ -40,13 +40,13 @@ pub const Semaphore = struct {
         };
     }
 
-    /// Initialize a binary semaphore (mutex-like, count 0 or 1)
+    // Initialize a binary semaphore (mutex-like, count 0 or 1)
     pub fn initBinary(initially_available: bool) Semaphore {
         return init(if (initially_available) 1 else 0, 1);
     }
 
-    /// Wait for the semaphore (P operation)
-    /// Decrements the count, blocks if count would go negative
+    // Wait for the semaphore (P operation)
+    // Decrements the count, blocks if count would go negative
     pub fn wait(self: *Semaphore) void {
         while (true) {
             const guard = self.lock.acquire();
@@ -63,8 +63,8 @@ pub const Semaphore = struct {
         }
     }
 
-    /// Try to wait for the semaphore without blocking
-    /// Returns true if acquired, false if would block
+    // Try to wait for the semaphore without blocking
+    // Returns true if acquired, false if would block
     pub fn tryWait(self: *Semaphore) bool {
         const guard = self.lock.acquire();
         defer _ = guard;
@@ -77,8 +77,8 @@ pub const Semaphore = struct {
         return false;
     }
 
-    /// Wait with timeout (in microseconds)
-    /// Returns true if acquired, false if timed out
+    // Wait with timeout (in microseconds)
+    // Returns true if acquired, false if timed out
     pub fn timedWait(self: *Semaphore, timeout_us: u64) bool {
         const timer = @import("../x86_64/timer.zig");
         const start_time = timer.readUptime();
@@ -99,8 +99,8 @@ pub const Semaphore = struct {
         }
     }
 
-    /// Signal the semaphore (V operation)
-    /// Increments the count, potentially unblocking waiters
+    // Signal the semaphore (V operation)
+    // Increments the count, potentially unblocking waiters
     pub fn signal(self: *Semaphore) void {
         const guard = self.lock.acquire();
         defer _ = guard;
@@ -109,13 +109,13 @@ pub const Semaphore = struct {
         self.count += 1;
     }
 
-    /// Signal the semaphore, same as signal() for compatibility
+    // Signal the semaphore, same as signal() for compatibility
     pub fn release(self: *Semaphore) void {
         self.signal();
     }
 
-    /// Try to signal the semaphore
-    /// Returns false if would exceed max_count
+    // Try to signal the semaphore
+    // Returns false if would exceed max_count
     pub fn trySignal(self: *Semaphore) bool {
         const guard = self.lock.acquire();
         defer _ = guard;
@@ -128,7 +128,7 @@ pub const Semaphore = struct {
         return false;
     }
 
-    /// Get the current count (may change immediately after return)
+    // Get the current count (may change immediately after return)
     pub fn getCount(self: *Semaphore) i32 {
         const guard = self.lock.acquire();
         defer _ = guard;
@@ -136,19 +136,19 @@ pub const Semaphore = struct {
         return self.count;
     }
 
-    /// Check if semaphore is available (count > 0)
+    // Check if semaphore is available (count > 0)
     pub fn isAvailable(self: *Semaphore) bool {
         return self.getCount() > 0;
     }
 
-    /// Wait and return a guard that releases on scope exit
+    // Wait and return a guard that releases on scope exit
     pub fn acquire(self: *Semaphore) Guard {
         self.wait();
         return .{ .sem = self };
     }
 
-    /// Reset the semaphore to a new count
-    /// Dangerous - use only when no threads are waiting
+    // Reset the semaphore to a new count
+    // Dangerous - use only when no threads are waiting
     pub fn reset(self: *Semaphore, new_count: i32) void {
         std.debug.assert(new_count >= 0);
         std.debug.assert(new_count <= self.max_count);
@@ -160,19 +160,19 @@ pub const Semaphore = struct {
     }
 };
 
-/// Barrier synchronization primitive
-/// Allows multiple threads to wait until all have reached a barrier point
+// Barrier synchronization primitive
+// Allows multiple threads to wait until all have reached a barrier point
 pub const Barrier = struct {
-    /// Number of threads that must reach the barrier
+    // Number of threads that must reach the barrier
     threshold: u32,
-    /// Current count of threads at the barrier
+    // Current count of threads at the barrier
     count: u32,
-    /// Generation counter to handle reuse
+    // Generation counter to handle reuse
     generation: u32,
-    /// Lock protecting the barrier state
+    // Lock protecting the barrier state
     lock: spinlock.SpinLock,
 
-    /// Initialize a new barrier for the specified number of threads
+    // Initialize a new barrier for the specified number of threads
     pub fn init(num_threads: u32) Barrier {
         std.debug.assert(num_threads > 0);
 
@@ -184,8 +184,8 @@ pub const Barrier = struct {
         };
     }
 
-    /// Wait at the barrier until all threads arrive
-    /// Returns true for exactly one thread (the last to arrive)
+    // Wait at the barrier until all threads arrive
+    // Returns true for exactly one thread (the last to arrive)
     pub fn wait(self: *Barrier) bool {
         const guard = self.lock.acquire();
 
@@ -210,7 +210,7 @@ pub const Barrier = struct {
         return false;
     }
 
-    /// Reset the barrier (dangerous if threads are waiting)
+    // Reset the barrier (dangerous if threads are waiting)
     pub fn reset(self: *Barrier) void {
         const guard = self.lock.acquire();
         defer _ = guard;
@@ -219,7 +219,7 @@ pub const Barrier = struct {
         self.generation +%= 1;
     }
 
-    /// Get the number of threads currently waiting
+    // Get the number of threads currently waiting
     pub fn getWaitingCount(self: *Barrier) u32 {
         const guard = self.lock.acquire();
         defer _ = guard;
@@ -228,9 +228,9 @@ pub const Barrier = struct {
     }
 };
 
-/// Test utilities
+// Test utilities
 pub const testing = struct {
-    /// Test basic semaphore operations
+    // Test basic semaphore operations
     pub fn testSemaphore() !void {
         // Test counting semaphore
         var sem = Semaphore.init(3, 5);
@@ -265,7 +265,7 @@ pub const testing = struct {
         try std.testing.expect(binary.tryWait());
     }
 
-    /// Test barrier synchronization
+    // Test barrier synchronization
     pub fn testBarrier() !void {
         var barrier = Barrier.init(3);
 

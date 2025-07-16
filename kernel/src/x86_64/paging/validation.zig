@@ -24,9 +24,7 @@ pub fn validateEntry(entry: u64, level: u8) !void {
 
     // Check if any reserved bits are set
     if ((entry & reserved_mask) != 0) {
-        serial.print("[PAGING] Reserved bit violation in level ", .{});
-        serial.print("{}", .{level});
-        serial.println(" entry: 0x{x:0>16}", .{entry});
+        serial.println("[PAGING] Reserved bit violation in level {} entry: 0x{x:0>16}", .{ level, entry });
         return error.ReservedBitViolation;
     }
 
@@ -55,9 +53,7 @@ pub fn validateEntry(entry: u64, level: u8) !void {
         };
 
         if (alignment > 0 and (addr % alignment) != 0) {
-            serial.print("[PAGING] Misaligned huge page address in level ", .{});
-            serial.print("{}", .{level});
-            serial.println(": 0x{x:0>16}", .{addr});
+            serial.println("[PAGING] Misaligned huge page address in level {}: 0x{x:0>16}", .{ level, addr });
             return error.MisalignedHugePage;
         }
     }
