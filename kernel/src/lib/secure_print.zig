@@ -85,13 +85,13 @@ pub fn printBootAddress(comptime name: []const u8, addr: u64) void {
 // Print size value (always safe)
 pub fn printSize(comptime name: []const u8, size: u64) void {
     if (size < 1024) {
-        serial.print("{s}: {} bytes", .{ name, size });
+        serial.println("{s}: {} bytes", .{ name, size });
     } else if (size < 1024 * 1024) {
-        serial.print("{s}: {} KB", .{ name, size / 1024 });
+        serial.println("{s}: {} KB", .{ name, size / 1024 });
     } else if (size < 1024 * 1024 * 1024) {
-        serial.print("{s}: {} MB", .{ name, size / (1024 * 1024) });
+        serial.println("{s}: {} MB", .{ name, size / (1024 * 1024) });
     } else {
-        serial.print("{s}: {} GB", .{ name, size / (1024 * 1024 * 1024) });
+        serial.println("{s}: {} GB", .{ name, size / (1024 * 1024 * 1024) });
     }
 }
 

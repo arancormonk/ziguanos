@@ -23,7 +23,7 @@ pub fn getViolations() u64 {
 }
 
 // Setup guard pages around critical memory regions
-pub fn setupGuardPages(boot_info: *const uefi_boot.UEFIBootInfo, markPagesAsUsedFn: fn (u64, u64) void, reserved_pages: *u64, total_pages: u64) void {
+pub fn setupGuardPages(boot_info: *const uefi_boot.UEFIBootInfo, markPagesAsUsedFn: fn (u64, u64) void, reserved_pages: *u64, _: u64) void {
     serial.print("[PMM] Setting up guard pages around critical regions...\n", .{});
 
     // Guard pages around kernel - use physical addresses in PIE mode
@@ -38,19 +38,18 @@ pub fn setupGuardPages(boot_info: *const uefi_boot.UEFIBootInfo, markPagesAsUsed
 
     // Add guard page before kernel (if possible)
     if (kernel_start >= PAGE_SIZE) {
-        const guard_before = (kernel_start - PAGE_SIZE) / PAGE_SIZE;
+        const guard_before = kernel_start - PAGE_SIZE;
         markPagesAsUsedFn(guard_before, 1);
-        secure_print.printValue("  Guard page before kernel", guard_before * PAGE_SIZE);
+        reserved_pages.* += 1;
+        secure_print.printValue("  Guard page before kernel", guard_before);
     }
 
     // Add guard page after kernel
     const kernel_end_aligned = (kernel_end + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-    const guard_after = kernel_end_aligned / PAGE_SIZE;
-    if (guard_after < total_pages) {
-        markPagesAsUsedFn(guard_after, 1);
-        reserved_pages.* += 1;
-        secure_print.printValue("  Guard page after kernel", guard_after * PAGE_SIZE);
-    }
+    const guard_after = kernel_end_aligned;
+    markPagesAsUsedFn(guard_after, 1);
+    reserved_pages.* += 1;
+    secure_print.printValue("  Guard page after kernel", guard_after);
 
     serial.print("[PMM] Guard pages setup completed\n", .{});
 }
