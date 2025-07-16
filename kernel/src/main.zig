@@ -135,6 +135,11 @@ fn kernelMainPhase2() noreturn {
     const reclaimed_mb = (stats_after.free_memory - stats_before.free_memory) / (1024 * 1024);
     serial.println("[KERNEL] Boot services memory reclaimed: {} MB", .{reclaimed_mb});
 
+    // Try to upgrade PMM bitmap for large memory systems
+    pmm.upgradeBitmapForLargeMemory(boot_info) catch |err| {
+        serial.println("[KERNEL] PMM bitmap upgrade failed: {s} (continuing with bootstrap bitmap)", .{error_utils.errorToString(err)});
+    };
+
     serial.println("[KERNEL] Memory initialization complete", .{});
     serial.flush();
 

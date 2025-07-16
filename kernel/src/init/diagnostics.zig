@@ -6,6 +6,7 @@ const serial = @import("../drivers/serial.zig");
 const stack_canary_test = @import("../x86_64/tests/stack_canary_test.zig");
 const vmm = @import("../memory/vmm.zig");
 const exception_validation_test = @import("../tests/exception_validation_test.zig");
+const large_memory_test = @import("../tests/large_memory_test.zig");
 
 // Run all diagnostic tests
 pub fn runAllTests() void {
@@ -23,6 +24,9 @@ pub fn runAllTests() void {
 
     // Print security statistics
     exception_validation_test.printSecurityStats();
+
+    // Test large memory support
+    large_memory_test.testLargeMemorySupport();
 }
 
 // Test serial driver

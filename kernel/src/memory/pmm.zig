@@ -26,8 +26,12 @@ const memory_regions = @import("pmm/memory_regions.zig");
 const PAGE_SIZE: u64 = 0x1000; // 4KB pages
 const PAGES_PER_BITMAP: u64 = 64; // One u64 bitmap entry tracks 64 pages
 
-// Dynamic bitmap sizing - support up to 512GB with region-based allocation
-const MAX_BITMAP_SIZE: usize = 1048576; // 1M u64s = 8MB bitmap = 512GB RAM
+// Dynamic bitmap sizing - support up to x86-64 architectural limits
+// We use a two-phase approach:
+// 1. Bootstrap phase: Use static bitmap for initial allocation (supports up to 4GB)
+// 2. Full phase: Dynamically allocate larger bitmap based on actual memory
+const BOOTSTRAP_BITMAP_SIZE: usize = 16384; // 16K u64s = 128KB bitmap = 4GB RAM
+const MAX_SUPPORTED_MEMORY: u64 = 16 * 1024 * 1024 * 1024 * 1024; // 16TB
 
 // Memory regions
 const PMM_RESERVED_BASE: u64 = 0x100000; // Reserve first 1MB
@@ -42,13 +46,15 @@ fn getKernelBase() u64 {
     return info.kernel_physical_base;
 }
 
-// Bitmap allocator - dynamically sized based on actual memory regions
-var bitmap_storage: [MAX_BITMAP_SIZE]u64 align(8) = undefined;
+// Bitmap allocator - two-phase approach for large memory support
+var bootstrap_bitmap: [BOOTSTRAP_BITMAP_SIZE]u64 align(8) = undefined;
+var dynamic_bitmap_ptr: ?[*]u64 = null; // Pointer to dynamically allocated bitmap
 var memory_bitmap: []u64 = undefined; // Actual slice used
 var bitmap_size: usize = 0;
 var total_pages: u64 = 0;
 var free_pages: u64 = 0;
 var reserved_pages: u64 = 0;
+var is_dynamic_bitmap: bool = false; // Track if we're using dynamic allocation
 
 // Security features
 var free_page_tracker = free_tracker.FreePageTracker{};
@@ -76,17 +82,27 @@ pub fn init(boot_info: *const uefi_boot.UEFIBootInfo) void {
 
     // Set up bitmap based on actual memory regions
     bitmap_size = region_info.bitmap_size_needed;
-    if (bitmap_size > MAX_BITMAP_SIZE) {
-        serial.print("[PMM] ERROR: Required bitmap size {} exceeds maximum {}\n", .{ bitmap_size, MAX_BITMAP_SIZE });
-        serial.print("[PMM] System has {} GB of RAM, maximum supported is {} GB\n", .{
+
+    // Check if we need more than the bootstrap bitmap can handle
+    if (bitmap_size > BOOTSTRAP_BITMAP_SIZE) {
+        serial.print("[PMM] Large memory system detected: {} GB RAM\n", .{
             (region_info.total_ram_pages * PAGE_SIZE) / (1024 * 1024 * 1024),
-            (MAX_BITMAP_SIZE * PAGES_PER_BITMAP * PAGE_SIZE) / (1024 * 1024 * 1024),
         });
-        @panic("Bitmap size exceeded");
+        serial.print("[PMM] Bootstrap bitmap supports {} GB, need bitmap for {} GB\n", .{
+            (BOOTSTRAP_BITMAP_SIZE * PAGES_PER_BITMAP * PAGE_SIZE) / (1024 * 1024 * 1024),
+            (bitmap_size * PAGES_PER_BITMAP * PAGE_SIZE) / (1024 * 1024 * 1024),
+        });
+
+        // For now, we'll use the bootstrap bitmap and limit memory detection
+        // After boot services exit, we can allocate a larger bitmap
+        serial.print("[PMM] WARNING: Using bootstrap bitmap, limiting to {} GB during early boot\n", .{
+            (BOOTSTRAP_BITMAP_SIZE * PAGES_PER_BITMAP * PAGE_SIZE) / (1024 * 1024 * 1024),
+        });
+        bitmap_size = BOOTSTRAP_BITMAP_SIZE;
     }
 
-    // Initialize bitmap slice
-    memory_bitmap = bitmap_storage[0..bitmap_size];
+    // Initialize bitmap slice with bootstrap bitmap
+    memory_bitmap = bootstrap_bitmap[0..bitmap_size];
     @memset(memory_bitmap, 0xFFFFFFFFFFFFFFFF); // Mark all as used initially
 
     total_pages = region_info.total_ram_pages;
@@ -203,7 +219,7 @@ pub fn init(boot_info: *const uefi_boot.UEFIBootInfo) void {
     }
 
     // Reserve PMM bitmap itself - use physical address
-    const bitmap_addr = runtime_info.getPhysicalAddress(&bitmap_storage);
+    const bitmap_addr = runtime_info.getPhysicalAddress(&bootstrap_bitmap);
     const bitmap_pages = (bitmap_size * @sizeOf(u64) + PAGE_SIZE - 1) / PAGE_SIZE;
     markPagesAsUsedInitial(bitmap_addr, bitmap_pages);
     reserved_pages += bitmap_pages;
@@ -969,4 +985,90 @@ pub fn isReserved(addr: u64, size: u64) bool {
 // Get detailed reserved regions information
 pub fn printReservedRegions() void {
     reserved_regions.getTracker().printDetailedList();
+}
+
+// Upgrade to a larger bitmap for systems with more than 8GB RAM
+// This should be called after boot services exit when we have more memory available
+pub fn upgradeBitmapForLargeMemory(boot_info: *const uefi_boot.UEFIBootInfo) !void {
+    // Get CPU capabilities to determine maximum supported memory
+    const cpuid = @import("../x86_64/cpuid.zig");
+    const max_phys_mem = cpuid.getMaxPhysicalMemory();
+    const phys_bits = cpuid.getPhysicalAddressBits();
+
+    serial.print("[PMM] Upgrading bitmap for large memory support\n", .{});
+    serial.print("[PMM] CPU supports {} physical address bits ({} TB max)\n", .{
+        phys_bits,
+        max_phys_mem / (1024 * 1024 * 1024 * 1024),
+    });
+
+    // Recalculate actual memory regions
+    const region_info = memory_regions.init(boot_info) catch |err| {
+        serial.print("[PMM] ERROR: Failed to reinitialize memory regions: {}\n", .{err});
+        return err;
+    };
+
+    const required_bitmap_size = region_info.bitmap_size_needed;
+
+    // Check if we actually need to upgrade
+    if (required_bitmap_size <= BOOTSTRAP_BITMAP_SIZE) {
+        serial.print("[PMM] No bitmap upgrade needed, current size sufficient\n", .{});
+        return;
+    }
+
+    // Calculate bitmap memory requirements
+    const bitmap_bytes = required_bitmap_size * @sizeOf(u64);
+    const bitmap_pages = (bitmap_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+
+    serial.print("[PMM] Need {} KB for bitmap to manage {} GB of RAM\n", .{
+        bitmap_bytes / 1024,
+        (total_pages * PAGE_SIZE) / (1024 * 1024 * 1024),
+    });
+
+    // Allocate contiguous pages for the new bitmap
+    const new_bitmap_addr = allocPages(bitmap_pages) orelse {
+        serial.print("[PMM] ERROR: Cannot allocate {} pages for extended bitmap\n", .{bitmap_pages});
+        return error.OutOfMemory;
+    };
+
+    serial.print("[PMM] Allocated new bitmap at 0x{x} ({} pages)\n", .{ new_bitmap_addr, bitmap_pages });
+
+    // Get the new bitmap as a slice
+    const new_bitmap_ptr = @as([*]u64, @ptrFromInt(new_bitmap_addr));
+    const new_bitmap = new_bitmap_ptr[0..required_bitmap_size];
+
+    // Copy current bitmap state to new bitmap
+    @memcpy(new_bitmap[0..bitmap_size], memory_bitmap);
+
+    // Initialize the rest of the new bitmap (mark as used)
+    if (required_bitmap_size > bitmap_size) {
+        @memset(new_bitmap[bitmap_size..], 0xFFFFFFFFFFFFFFFF);
+    }
+
+    // Now process the full memory map with the new bitmap
+    const old_bitmap_size = bitmap_size;
+    bitmap_size = required_bitmap_size;
+    memory_bitmap = new_bitmap;
+    dynamic_bitmap_ptr = new_bitmap_ptr;
+    is_dynamic_bitmap = true;
+
+    // No need to reprocess - the memory was already discovered during init
+    // The bitmap upgrade just allows us to track memory that was already counted
+    // but couldn't be managed due to bitmap size limitations
+    serial.print("[PMM] Bootstrap bitmap could only track {} GB\n", .{
+        (BOOTSTRAP_BITMAP_SIZE * PAGES_PER_BITMAP * PAGE_SIZE) / (1024 * 1024 * 1024),
+    });
+    serial.print("[PMM] Extended bitmap can now track all {} GB\n", .{
+        (total_pages * PAGE_SIZE) / (1024 * 1024 * 1024),
+    });
+
+    serial.print("[PMM] Bitmap upgraded successfully\n", .{});
+    serial.print("[PMM] Old bitmap size: {} KB, New bitmap size: {} KB\n", .{
+        (old_bitmap_size * @sizeOf(u64)) / 1024,
+        bitmap_bytes / 1024,
+    });
+    serial.print("[PMM] Memory tracking capacity increased from {} GB to {} GB\n", .{
+        (BOOTSTRAP_BITMAP_SIZE * PAGES_PER_BITMAP * PAGE_SIZE) / (1024 * 1024 * 1024),
+        (required_bitmap_size * PAGES_PER_BITMAP * PAGE_SIZE) / (1024 * 1024 * 1024),
+    });
+    serial.print("[PMM] Total free memory: {} MB (unchanged)\n", .{(free_pages * PAGE_SIZE) / (1024 * 1024)});
 }

@@ -207,6 +207,52 @@ pub fn getVendorString() [12]u8 {
     return vendor;
 }
 
+// Get physical address bits supported by the CPU
+pub fn getPhysicalAddressBits() u8 {
+    // Check if extended function 0x80000008 is supported
+    const max_extended = cpuid(0x80000000, 0);
+    if (max_extended.eax < 0x80000008) {
+        // Default to 36 bits (64GB) for old CPUs
+        return 36;
+    }
+
+    // Get physical and linear address sizes
+    const addr_sizes = cpuid(0x80000008, 0);
+    const phys_bits = @as(u8, @truncate(addr_sizes.eax & 0xFF));
+
+    // Sanity check - x86-64 requires at least 36 bits, max is 52 bits
+    if (phys_bits < 36) return 36;
+    if (phys_bits > 52) return 52;
+
+    return phys_bits;
+}
+
+// Get linear (virtual) address bits supported by the CPU
+pub fn getLinearAddressBits() u8 {
+    // Check if extended function 0x80000008 is supported
+    const max_extended = cpuid(0x80000000, 0);
+    if (max_extended.eax < 0x80000008) {
+        // Default to 48 bits for 4-level paging
+        return 48;
+    }
+
+    // Get physical and linear address sizes
+    const addr_sizes = cpuid(0x80000008, 0);
+    const linear_bits = @as(u8, @truncate((addr_sizes.eax >> 8) & 0xFF));
+
+    // Sanity check
+    if (linear_bits < 48) return 48;
+    if (linear_bits > 57) return 57; // LA57 max
+
+    return linear_bits;
+}
+
+// Get maximum physical memory supported
+pub fn getMaxPhysicalMemory() u64 {
+    const phys_bits = getPhysicalAddressBits();
+    return @as(u64, 1) << @as(u6, @truncate(phys_bits));
+}
+
 pub fn printFeatures() void {
     const serial = @import("../drivers/serial.zig");
     const stack_security = @import("stack_security.zig");
@@ -223,6 +269,14 @@ pub fn printFeatures() void {
     serial.print("  NX bit: {s}\r\n", .{if (cpu_features.nx) "Yes" else "No"});
     serial.print("  1GB pages: {s}\r\n", .{if (cpu_features.gbpages) "Yes" else "No"});
     serial.print("  LA57 (5-level paging): {s}\r\n", .{if (cpu_features.la57) "Yes" else "No"});
+
+    // Print address size information
+    const phys_bits = getPhysicalAddressBits();
+    const linear_bits = getLinearAddressBits();
+    const max_phys_mem = getMaxPhysicalMemory();
+    serial.print("  Physical address bits: {}\r\n", .{phys_bits});
+    serial.print("  Linear address bits: {}\r\n", .{linear_bits});
+    serial.print("  Max physical memory: {} TB\r\n", .{max_phys_mem / (1024 * 1024 * 1024 * 1024)});
 
     serial.println("[CPU] Security Features:", .{});
     serial.print("  SMEP: {s}\r\n", .{if (cpu_features.smep) "Yes" else "No"});

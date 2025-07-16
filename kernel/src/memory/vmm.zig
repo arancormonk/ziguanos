@@ -4,6 +4,7 @@
 const std = @import("std");
 const pmm = @import("pmm.zig");
 const paging = @import("../x86_64/paging.zig");
+const paging_constants = @import("../x86_64/paging/constants.zig");
 const stack_security = @import("../x86_64/stack_security.zig");
 const serial = @import("../drivers/serial.zig");
 const runtime_info = @import("../boot/runtime_info.zig");
@@ -289,7 +290,7 @@ pub fn getPhysicalAddress(virt_addr: u64) ?u64 {
     // Check for 1GB huge page
     if ((pdpt[pdpt_idx] & paging.PAGE_HUGE) != 0) {
         // Mask to get physical address (bits 51:30 for 1GB pages)
-        const phys_1gb = pdpt[pdpt_idx] & 0x000FFFFFC0000000; // Physical address mask for 1GB pages
+        const phys_1gb = pdpt[pdpt_idx] & paging_constants.PHYS_ADDR_MASK_1G;
         const offset_1gb = virt_addr & 0x3FFFFFFF; // Get offset within 1GB page
         return phys_1gb | offset_1gb;
     }
@@ -301,7 +302,7 @@ pub fn getPhysicalAddress(virt_addr: u64) ?u64 {
     // Check for 2MB huge page
     if ((pd[pd_idx] & paging.PAGE_HUGE) != 0) {
         // Mask to get physical address (bits 51:21 for 2MB pages)
-        const phys_2mb = pd[pd_idx] & 0x000FFFFFFFE00000; // Physical address mask for 2MB pages
+        const phys_2mb = pd[pd_idx] & paging_constants.PHYS_ADDR_MASK_2M;
         const offset_2mb = virt_addr & 0x1FFFFF; // Get offset within 2MB page
         return phys_2mb | offset_2mb;
     }
@@ -311,7 +312,7 @@ pub fn getPhysicalAddress(virt_addr: u64) ?u64 {
     if ((pt[pt_idx] & paging.PAGE_PRESENT) == 0) return null;
 
     // For 4KB pages, mask to get physical address (bits 51:12)
-    const phys_page = pt[pt_idx] & 0x000FFFFFFFFFF000;
+    const phys_page = pt[pt_idx] & paging_constants.PHYS_ADDR_MASK_4K;
     return phys_page | offset;
 }
 
@@ -579,7 +580,7 @@ pub fn runTests() void {
         }
 
         // Check the actual flags
-        const pte_flags = pt[pt_idx] & ~@as(u64, 0x000FFFFFFFFFF000);
+        const pte_flags = pt[pt_idx] & ~paging_constants.PHYS_ADDR_MASK_4K;
         serial.println("[VMM] PTE flags: 0x{x} (PRESENT={}, WRITABLE={}, NX={})", .{ pte_flags, (pte_flags & paging.PAGE_PRESENT) != 0, (pte_flags & paging.PAGE_WRITABLE) != 0, (pte_flags & paging.PAGE_NO_EXECUTE) != 0 });
 
         // Force TLB flush for this specific address
@@ -603,7 +604,7 @@ pub fn runTests() void {
 
         // Debug: Let's check what the page table says about the physical address
         const expected_phys = test_phys;
-        const pt_phys_addr = pt[pt_idx] & 0x000FFFFFFFFFF000;
+        const pt_phys_addr = pt[pt_idx] & paging_constants.PHYS_ADDR_MASK_4K;
         serial.println("[VMM] PT entry physical address: 0x{x:0>16}, expected: 0x{x:0>16}", .{ pt_phys_addr, expected_phys });
 
         if (pt_phys_addr != expected_phys) {

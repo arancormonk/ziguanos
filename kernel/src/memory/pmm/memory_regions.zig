@@ -10,7 +10,7 @@ const serial = @import("../../drivers/serial.zig");
 
 const PAGE_SIZE: u64 = 0x1000;
 const PAGES_PER_BITMAP: u64 = 64;
-const MAX_REGIONS = 32;
+const MAX_REGIONS = 128; // Increased to handle more fragmented memory layouts
 
 // Memory region descriptor
 pub const MemoryRegion = struct {

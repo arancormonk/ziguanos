@@ -35,8 +35,15 @@ pub const RESERVED_BITS_PD: u64 = RESERVED_BITS_MASK_HIGH;
 pub const RESERVED_BITS_PD_2M: u64 = RESERVED_BITS_MASK_HIGH | 0x1F_E000; // Also bits 20:13
 pub const RESERVED_BITS_PT: u64 = RESERVED_BITS_MASK_HIGH;
 
-// Address masks
-pub const PHYS_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+// Address masks - we support up to 52 physical address bits (max for x86-64)
+// The actual mask should be based on CPUID MAXPHYADDR, but we use the max here
+// Individual page table entry handlers should apply the appropriate mask
+pub const PHYS_ADDR_MASK_4K: u64 = 0x000F_FFFF_FFFF_F000; // Bits 51:12 for 4KB pages
+pub const PHYS_ADDR_MASK_2M: u64 = 0x000F_FFFF_FFE0_0000; // Bits 51:21 for 2MB pages
+pub const PHYS_ADDR_MASK_1G: u64 = 0x000F_FFFC_0000_0000; // Bits 51:30 for 1GB pages
+
+// Legacy compatibility
+pub const PHYS_ADDR_MASK: u64 = PHYS_ADDR_MASK_4K;
 
 // Page permission combinations
 pub const PAGE_KERNEL_CODE: u64 = PAGE_PRESENT | PAGE_GLOBAL;
