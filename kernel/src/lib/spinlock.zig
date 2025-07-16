@@ -1,4 +1,4 @@
-// Copyright 2025 ziguanos
+// Copyright 2025 arancormonk
 // SPDX-License-Identifier: MIT
 
 const std = @import("std");

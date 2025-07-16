@@ -1,5 +1,5 @@
-// Copyright 2025 arancormonk
-// SPDX-License-Identifier: MIT
+# Copyright 2025 arancormonk
+# SPDX-License-Identifier: MIT
 
 # Interrupt handler stubs for vectors 32-255
 # These are for hardware interrupts and need to call handleInterrupt
@@ -19,10 +19,10 @@ interrupt_common:
     # Critical: Clear AC flag if SMAP is enabled
     # This prevents kernel from accessing user memory without proper stac/clac
     clac
-    
+
     # Apply memory barrier on kernel entry
     mfence
-    
+
     # Save all registers (15 registers = 120 bytes)
     pushq %rax
     pushq %rbx
@@ -44,7 +44,7 @@ interrupt_common:
     # Stack layout after pushes:
     # RSP+0:   saved R15
     # ...
-    # RSP+112: saved RAX 
+    # RSP+112: saved RAX
     # RSP+120: interrupt number (pushed by stub)
     # RSP+128: error code (0, pushed by stub)
     # RSP+136: RIP (pushed by CPU)
@@ -52,10 +52,10 @@ interrupt_common:
     # RSP+152: RFLAGS (pushed by CPU)
     # RSP+160: RSP (pushed by CPU)
     # RSP+168: SS (pushed by CPU)
-    
+
     # Apply speculation barrier after register saves
     lfence
-    
+
     # Clear CPU buffers with VERW if coming from user mode
     testq $3, 144(%rsp)     # Check original CS
     jz 2f                   # Skip if was already in kernel mode
@@ -65,7 +65,7 @@ interrupt_common:
     verw (%rsp)             # Clear buffers
     addq $2, %rsp           # Clean up
 2:
-    
+
     # Set up parameters for handler
     movq 120(%rsp), %rdi    # Interrupt number
     movq 128(%rsp), %rsi    # Error code (always 0 for interrupts)
@@ -90,21 +90,21 @@ interrupt_common:
     popq %rcx
     popq %rbx
     popq %rax
-    
+
     # Check if returning to user mode
     testq $3, 24(%rsp)      # Check CS
     jz 3f                   # Skip if staying in kernel mode
-    
+
     # Call comprehensive MDS mitigation function
     # This handles all CPU buffer clearing based on vulnerability status
     call mitigateOnKernelExitAsm
-    
+
     # Memory barrier before swapgs
     mfence
-    
+
     # Swap GS back
     swapgs
-    
+
     # Final speculation barrier
     lfence
 3:
@@ -129,19 +129,19 @@ minimal_interrupt32:
     clac
     # Memory barrier on entry
     mfence
-    
+
     # Save only what we need
     pushq %rax
     pushq %rdx
-    
+
     # Send EOI to APIC (use 64-bit addressing)
     movq $0xFEE000B0, %rdx
     movl $0, (%rdx)
-    
+
     # Restore and return
     popq %rdx
     popq %rax
-    
+
     # Check if returning to user mode
     testq $3, 8(%rsp)       # Check CS
     jz 2f
@@ -167,23 +167,23 @@ test_interrupt32:
     clac
     # Memory barrier on entry
     mfence
-    
+
     # Save registers we'll use
     pushq %rax
     pushq %rdx
-    
+
     # Increment a test counter in memory (PIE-compatible with RIP-relative addressing)
     incq test_counter(%rip)
-    
+
     # Send EOI to APIC (0xFEE000B0 = APIC EOI register)
     # Use proper 64-bit addressing
     movq $0xFEE000B0, %rdx
     movl $0, (%rdx)
-    
+
     # Restore registers
     popq %rdx
     popq %rax
-    
+
     # Check if returning to user mode
     testq $3, 8(%rsp)       # Check CS
     jz 2f

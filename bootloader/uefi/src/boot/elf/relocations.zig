@@ -1,9 +1,6 @@
 // Copyright 2025 arancormonk
 // SPDX-License-Identifier: MIT
 
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2024 Ziguanos. All rights reserved.
-
 // ELF Relocations Module
 //
 // This module handles ELF relocation processing for Position Independent

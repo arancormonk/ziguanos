@@ -1,9 +1,6 @@
 // Copyright 2025 arancormonk
 // SPDX-License-Identifier: MIT
 
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2024 Ziguanos. All rights reserved.
-
 // KASLR Offset Generation Module
 //
 // This module contains the core KASLR offset generation logic, including

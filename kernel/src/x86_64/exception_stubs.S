@@ -1,5 +1,5 @@
-// Copyright 2025 arancormonk
-// SPDX-License-Identifier: MIT
+# Copyright 2025 arancormonk
+# SPDX-License-Identifier: MIT
 
 .section .text
 
@@ -79,10 +79,10 @@ exception_common:
     # Critical: Clear AC flag if SMAP is enabled
     # This prevents kernel from accessing user memory without proper stac/clac
     clac
-    
+
     # Apply memory barrier on kernel entry
     mfence
-    
+
     # Save all registers
     pushq %rax
     pushq %rbx
@@ -99,7 +99,7 @@ exception_common:
     pushq %r13
     pushq %r14
     pushq %r15
-    
+
     # Save segment registers
     movw %ds, %ax
     pushq %rax
@@ -109,7 +109,7 @@ exception_common:
     pushq %rax
     movw %gs, %ax
     pushq %rax
-    
+
     # Load kernel data segments
     movw $0x10, %ax
     movw %ax, %ds
@@ -117,10 +117,10 @@ exception_common:
     xorw %ax, %ax
     movw %ax, %fs
     movw %ax, %gs
-    
+
     # Apply speculation barrier after segment loads
     lfence
-    
+
     # Clear CPU buffers with VERW if coming from user mode
     testq $3, 168(%rsp)     # Check original CS (adjusted for all pushes)
     jz 2f                   # Skip if was already in kernel mode
@@ -148,7 +148,7 @@ exception_common:
     movw %ax, %es
     popq %rax
     movw %ax, %ds
-    
+
     # Restore registers (might return if recovered)
     popq %r15
     popq %r14
@@ -165,21 +165,21 @@ exception_common:
     popq %rcx
     popq %rbx
     popq %rax
-    
+
     # Check if returning to user mode
     testq $3, 24(%rsp)      # Check CS
     jz 3f                   # Skip if staying in kernel mode
-    
+
     # Call comprehensive MDS mitigation function
     # This handles all CPU buffer clearing based on vulnerability status
     call mitigateOnKernelExitAsm
-    
+
     # Memory barrier before swapgs
     mfence
-    
+
     # Swap GS back
     swapgs
-    
+
     # Final speculation barrier
     lfence
 3:

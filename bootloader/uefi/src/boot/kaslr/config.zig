@@ -1,9 +1,6 @@
 // Copyright 2025 arancormonk
 // SPDX-License-Identifier: MIT
 
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2024 Ziguanos. All rights reserved.
-
 // KASLR Configuration Module
 //
 // This module contains all KASLR-related configuration constants, structures,
