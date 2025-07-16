@@ -538,7 +538,13 @@ fn setupIdentityMapping(boot_info: *const uefi_boot.UEFIBootInfo) usize {
 
                 // Always apply NX bit to large pages - we'll use fine-grained
                 // permissions for kernel regions later
-                flags |= PAGE_NO_EXECUTE;
+                // Exception: First 2MB needs to be executable for AP trampoline
+                if (phys_addr < PAGE_SIZE_2M) {
+                    // First 2MB contains AP trampoline at 0x8000
+                    // Don't set NX bit for this region
+                } else {
+                    flags |= PAGE_NO_EXECUTE;
+                }
 
                 // Check if this is in the 4th GB which contains MMIO regions
                 if (gb_index == 3) {

@@ -57,11 +57,21 @@ pub fn testPagingMemoryProtection(getPageTableEntryFn: GetPageTableEntryFn) void
     serial.println("[PAGING] Test 2: Data page W^X verification", .{});
 
     // Find a data page (stack area)
+    // Note: We need to check a page outside the first 2MB since that region
+    // may not have NX bit set due to AP trampoline requirements
     const stack_addr = asm volatile (
         \\mov %%rsp, %[result]
         : [result] "=r" (-> u64),
     );
-    const data_page = stack_addr & ~(constants.PAGE_SIZE_4K - 1);
+
+    // If stack is in first 2MB (which can happen with early boot stack),
+    // use a different address for testing
+    const test_addr = if (stack_addr < constants.PAGE_SIZE_2M)
+        constants.PAGE_SIZE_2M + constants.PAGE_SIZE_4K // Use an address in the second 2MB
+    else
+        stack_addr;
+
+    const data_page = test_addr & ~(constants.PAGE_SIZE_4K - 1);
 
     if (getPageTableEntryFn(data_page) catch null) |pte| {
         const is_writable = (pte & constants.PAGE_WRITABLE) != 0;
