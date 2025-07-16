@@ -152,15 +152,16 @@ pub fn init(boot_info: *const uefi_boot.UEFIBootInfo) void {
     }
 
     // Map bootloader-provided tables to kernel virtual addresses
-    pml4_table = @as(*[512]u64, @ptrFromInt(page_table_info.pml4_phys_addr));
-    pdpt_table = @as(*[512]u64, @ptrFromInt(page_table_info.pdpt_phys_addr));
+    // IMPORTANT: Convert physical addresses to virtual addresses
+    pml4_table = @as(*[512]u64, @ptrFromInt(runtime_info.physToVirt(page_table_info.pml4_phys_addr)));
+    pdpt_table = @as(*[512]u64, @ptrFromInt(runtime_info.physToVirt(page_table_info.pdpt_phys_addr)));
 
     // Create slices for PD tables
-    const pd_base = @as([*][512]u64, @ptrFromInt(page_table_info.pd_table_base));
+    const pd_base = @as([*][512]u64, @ptrFromInt(runtime_info.physToVirt(page_table_info.pd_table_base)));
     pd_tables = pd_base[0..page_table_info.pd_table_count];
 
     // Create slices for PT tables
-    const pt_base = @as([*][512]u64, @ptrFromInt(page_table_info.pt_table_base));
+    const pt_base = @as([*][512]u64, @ptrFromInt(runtime_info.physToVirt(page_table_info.pt_table_base)));
     kernel_pts = pt_base[0..page_table_info.pt_table_count];
 
     serial.println("[PAGING] Using bootloader-allocated page tables:", .{});
@@ -217,9 +218,11 @@ pub fn init(boot_info: *const uefi_boot.UEFIBootInfo) void {
 
     secure_print.printRange("[PAGING] Kernel memory range", kernel_base, kernel_end);
 
-    if (pml4_virt_addr >= kernel_end) {
-        serial.println("[PAGING] WARNING: PML4 is beyond kernel memory range!", .{});
-        serial.println("[PAGING] This may cause a triple fault when loading CR3", .{});
+    // Check if PML4 is within kernel range - this is informational only
+    // Page tables don't need to be within kernel code/data range, just accessible
+    if (pml4_virt_addr < kernel_base or pml4_virt_addr >= kernel_end) {
+        serial.println("[PAGING] INFO: PML4 at 0x{x:0>16} is outside kernel code/data range", .{pml4_virt_addr});
+        serial.println("[PAGING] This is normal when bootloader allocates page tables separately", .{});
     }
 
     // Get current CR3 for comparison

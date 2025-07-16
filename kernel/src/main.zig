@@ -120,8 +120,8 @@ fn kernelMainPhase2() noreturn {
     });
 
     // Show reserved regions before reclaim
-    serial.println("[KERNEL] Reserved regions before reclaim:", .{});
-    pmm.printReservedRegions();
+    // serial.println("[KERNEL] Reserved regions before reclaim:", .{});
+    // pmm.printReservedRegions();
 
     pmm.markBootServicesExited(boot_info);
 
