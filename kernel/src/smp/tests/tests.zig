@@ -5,6 +5,7 @@ const std = @import("std");
 const functional_tests = @import("functional_tests.zig");
 const per_cpu_tests = @import("per_cpu_tests.zig");
 const ap_debug_tests = @import("ap_debug_tests.zig");
+const uefi_ap_tests = @import("uefi_ap_tests.zig");
 const serial = @import("../../drivers/serial.zig");
 
 // Run all SMP tests
@@ -16,6 +17,9 @@ pub fn runAllTests() !void {
 
     // Run AP debug tests
     try ap_debug_tests.testApDebug();
+
+    // Run UEFI AP tests
+    try runUefiApTests();
 
     // Run functional tests
     try functional_tests.runAll();
@@ -39,6 +43,11 @@ pub fn runPerCpuTests() !void {
 // Run AP debug tests
 pub fn runApDebugTests() !void {
     try ap_debug_tests.testApDebug();
+}
+
+// Run UEFI AP tests
+pub fn runUefiApTests() !void {
+    try uefi_ap_tests.runAll();
 }
 
 // Individual test exports for direct calling

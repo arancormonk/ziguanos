@@ -85,6 +85,18 @@ pub const BootInfo = extern struct {
     // Page table information from bootloader
     page_table_info: PageTableInfo,
 
+    // MP Services information
+    mp_info: MpServicesInfo,
+
     // Reserved for future use
-    reserved: [21]u64, // Reduced from 24 to accommodate page table info
+    reserved: [13]u64, // Reduced to accommodate page table info and mp info
+};
+
+pub const MpServicesInfo = extern struct {
+    available: bool, // Was MP Services Protocol available?
+    total_processors: u32, // Total processor count
+    enabled_processors: u32, // Enabled processor count
+    bsp_id: u32, // Bootstrap processor ID
+    ap_initialized_by_uefi: bool, // Were APs pre-initialized?
+    _reserved: [3]u32, // Reserved for future use
 };

@@ -20,6 +20,10 @@ const error_utils = @import("../lib/error_utils.zig");
 const cpu_init = @import("../x86_64/cpu_init.zig");
 const gdt = @import("../x86_64/gdt.zig");
 const idt = @import("../x86_64/idt.zig");
+const UefiApManager = @import("uefi_ap_manager.zig").UefiApManager;
+const ap_startup_sequence = @import("ap_startup_sequence.zig");
+const boot_protocol = @import("shared");
+const ap_state_validator = @import("ap_state_validator.zig");
 
 // Import the trampoline symbols
 // These are defined in trampoline.S in the .data.trampoline section
@@ -42,8 +46,19 @@ pub const ApStartupState = struct {
 pub var startup_state: ApStartupState = .{};
 var startup_lock = spinlock.SpinLock{};
 
+// UEFI AP manager (initialized from boot info)
+var uefi_ap_manager: ?UefiApManager = null;
+
 // Simple verification counter that APs increment
 pub var ap_alive_counter: u32 = 0;
+
+// Initialize UEFI AP manager from boot info
+pub fn initUefiApManager(boot_info: *const boot_protocol.BootInfo) void {
+    uefi_ap_manager = UefiApManager.init(boot_info);
+    if (uefi_ap_manager) |*manager| {
+        manager.prepareApStartup();
+    }
+}
 
 // Intel SDM 10.4.4: Lock Semaphore for AP initialization
 var lock_semaphore: std.atomic.Value(u32) = std.atomic.Value(u32).init(0); // 0 = VACANT
@@ -459,6 +474,33 @@ pub fn initAP(cpu_id: u32, apic_id: u8) !void {
         return err;
     };
 
+    // Use validator to check if AP actually started
+    const validator = ap_state_validator.ApStateValidator;
+    var ap_started = validator.validateApStarted(cpu_id, 500) catch false; // 500ms initial check
+
+    if (!ap_started) {
+        serial.println("[SMP] AP {} did not start after INIT-SIPI-SIPI, diagnosing...", .{cpu_id});
+        validator.diagnoseApFailure(cpu_id);
+
+        // Try fallback mechanisms
+        const ApFallback = @import("ap_fallback.zig").ApFallback;
+        serial.println("[SMP] Attempting fallback startup methods for AP {}...", .{cpu_id});
+
+        const trampoline_addr = @as(u16, @intCast(TRAMPOLINE_ADDR));
+        ap_started = ApFallback.tryAlternativeStartup(apic_id, trampoline_addr) catch false;
+
+        if (!ap_started) {
+            serial.println("[SMP] All fallback methods failed for AP {}", .{cpu_id});
+            ApFallback.diagnoseFailure(apic_id);
+            ap_debug.recordApError(cpu_id, @intFromEnum(ApError.StartupTimeout), ap_debug.DebugFlags.TIMEOUT);
+            // Continue without this AP
+        } else {
+            serial.println("[SMP] AP {} started using fallback method!", .{cpu_id});
+        }
+    } else {
+        serial.println("[SMP] AP {} responded to INIT-SIPI-SIPI", .{cpu_id});
+    }
+
     // Wait for AP to signal ready
     // Use TSC directly since interrupts are disabled
     const tsc_freq = timer.getTSCFrequency();
@@ -538,6 +580,8 @@ pub fn initAP(cpu_id: u32, apic_id: u8) !void {
                     const zig_cpu_id = @as(*volatile u32, @ptrFromInt(0x5B4)).*;
                     if (zig_marker == 0xDEADC0DE) {
                         serial.println("[SMP]   ZIG ENTRY DETECTED! Marker=0x{x}, CPU={}", .{ zig_marker, zig_cpu_id });
+                    } else if (zig_marker == 0xCAFEBABE) {
+                        serial.println("[SMP]   Assembly pre-jump marker detected! CPU={}", .{zig_cpu_id});
                     }
                 }
             }
@@ -1181,10 +1225,21 @@ fn updateTrampolineData(cpu_id: u32, stack_top: [*]u8, cpu_data: *per_cpu.CpuDat
 fn setupKernelDescriptorPointers(ap_startup_data_base: u64) void {
     _ = ap_startup_data_base; // Not used anymore
 
-    // Use fixed locations in low memory for transition GDT and kernel IDT
-    const TRANSITION_GDT_ADDR: u64 = 0x9000;
-    const TRANSITION_GDTR_ADDR: u64 = 0x9100;
-    const KERNEL_IDTR_ADDR: u64 = 0x9110;
+    // Use fixed locations within the already-mapped trampoline region
+    // The trampoline is at 0x8000 and is about 3KB (0xBD0), ending around 0x8BD0
+    // Place the transition GDT at the end of the trampoline region but before 0x9000
+    const TRANSITION_GDT_ADDR: u64 = 0x8E00; // Near end of trampoline region
+    const TRANSITION_GDTR_ADDR: u64 = 0x8F00; // 256 bytes after GDT
+    const KERNEL_IDTR_ADDR: u64 = 0x8F10; // Right after GDTR
+
+    // First, verify this memory region is accessible
+    const test_ptr = @as(*volatile u64, @ptrFromInt(TRANSITION_GDT_ADDR));
+    test_ptr.* = 0x1234567890ABCDEF;
+    if (test_ptr.* != 0x1234567890ABCDEF) {
+        serial.println("[SMP] ERROR: Cannot access transition GDT memory at 0x{x}!", .{TRANSITION_GDT_ADDR});
+        @panic("Transition GDT memory not accessible");
+    }
+    test_ptr.* = 0; // Clear test value
 
     // Get the current GDT and IDT from the BSP
     var kernel_gdt_info: gdt.GDTPointer = undefined;
@@ -1231,6 +1286,18 @@ fn setupKernelDescriptorPointers(ap_startup_data_base: u64) void {
 
     serial.println("[SMP] Created transition GDT at 0x{x} with kernel segments", .{TRANSITION_GDT_ADDR});
 
+    // Verify the GDTR structure at 0x9100
+    const verify_limit = @as(*const u16, @ptrFromInt(TRANSITION_GDTR_ADDR)).*;
+    const verify_base_ptr = @as([*]const u8, @ptrFromInt(TRANSITION_GDTR_ADDR + 2));
+    var verify_base: u64 = 0;
+    for (0..8) |i| {
+        verify_base |= @as(u64, verify_base_ptr[i]) << @as(u6, @intCast(i * 8));
+    }
+    serial.println("[SMP] Transition GDTR at 0x{x}: limit=0x{x}, base=0x{x}", .{ TRANSITION_GDTR_ADDR, verify_limit, verify_base });
+    if (verify_base != TRANSITION_GDT_ADDR) {
+        serial.println("[SMP] ERROR: GDTR base mismatch! Expected 0x{x}, got 0x{x}", .{ TRANSITION_GDT_ADDR, verify_base });
+    }
+
     // Write kernel IDT pointer to fixed location
     const kernel_idtr_ptr = @as(*volatile u16, @ptrFromInt(KERNEL_IDTR_ADDR));
     kernel_idtr_ptr.* = kernel_idt_info.limit;
@@ -1260,7 +1327,18 @@ fn setupKernelDescriptorPointers(ap_startup_data_base: u64) void {
         : [addr] "r" (KERNEL_IDTR_ADDR),
         : "memory"
     );
+    // Also flush the GDT entries themselves
+    for (0..3) |i| {
+        const entry_addr = TRANSITION_GDT_ADDR + i * 8;
+        asm volatile ("clflush (%[addr])"
+            :
+            : [addr] "r" (entry_addr),
+            : "memory"
+        );
+    }
     asm volatile ("mfence" ::: "memory");
+
+    serial.println("[SMP] Transition GDT and descriptors flushed for cache coherency", .{});
 }
 
 // Simple busy wait for AP startup (doesn't require interrupts or TSC)
@@ -1501,13 +1579,22 @@ fn sendInitSipiSipi(apic_id: u8) !void {
     apic_unified.sendIPIFull(apic_id, 0, .Init, .Deassert, .Level, .NoShorthand);
     busyWait(10000); // Short delay
 
-    // Intel SDM: Send the actual INIT assert IPI
-    // Format: 000C4500H (as shown in Table 10-1)
-    apic_unified.sendIPIFull(apic_id, 0, .Init, .Assert, .Edge, .NoShorthand);
+    // CRITICAL FOR UEFI: Send INIT assert with Level trigger
+    // This provides a stronger reset signal for APs that UEFI has initialized
+    // Some UEFI systems need Level-triggered INIT to properly reset APs
+    apic_unified.sendIPIFull(apic_id, 0, .Init, .Assert, .Level, .NoShorthand);
+
+    // Wait for INIT to take effect
+    pitPollingDelay(1000); // 1ms
+
+    // Send INIT de-assert to complete the sequence
+    apic_unified.sendIPIFull(apic_id, 0, .Init, .Deassert, .Level, .NoShorthand);
 
     // Intel SDM 10.4.4: Wait 10ms after INIT IPI
-    serial.println("[SMP] Waiting 10ms after INIT...", .{});
-    pitPollingDelay(10_000); // 10ms = 10,000 microseconds
+    // Use UEFI-aware delay if available
+    const init_delay = if (uefi_ap_manager) |*manager| manager.getInitDelay() else 10_000;
+    serial.println("[SMP] Waiting {}ms after INIT...", .{init_delay / 1000});
+    pitPollingDelay(init_delay);
 
     // Additional synchronization delay
     ap_sync.apStartupDelay(10_000);
@@ -1574,11 +1661,10 @@ fn sendInitSipiSipi(apic_id: u8) !void {
     apic_unified.sendIPIFull(apic_id, 0x08, .Startup, .Assert, .Edge, .NoShorthand);
 
     // Intel SDM 10.4.4: Wait 200us between SIPIs
-    serial.println("[SMP] Waiting 200us between SIPIs...", .{});
-    pitPollingDelay(200); // Wait 200 microseconds
-
-    // Additional synchronization delay
-    ap_sync.apStartupDelay(5_000);
+    // Use UEFI-aware delay if available
+    const sipi_delay = if (uefi_ap_manager) |*manager| manager.getSipiDelay() else 200;
+    serial.println("[SMP] Waiting {}us between SIPIs...", .{sipi_delay});
+    pitPollingDelay(sipi_delay);
 
     // Intel SDM 10.4.4: Send second SIPI
     serial.println("[SMP] Sending second SIPI with vector 0x08", .{});
@@ -1598,7 +1684,10 @@ fn sendInitSipiSipi(apic_id: u8) !void {
     apic_unified.sendIPIFull(apic_id, 0x08, .Startup, .Assert, .Edge, .NoShorthand);
 
     // Add a delay after second SIPI to ensure it completes and avoid race
-    ap_sync.apStartupDelay(50_000); // 50k pause cycles
+    // Use extended delay for UEFI systems
+    const post_sipi_delay = if (uefi_ap_manager) |*manager| manager.getSipiDelay() * 5 else 1000;
+    serial.println("[SMP] Waiting {}ms after second SIPI for AP to start...", .{post_sipi_delay / 1000});
+    pitPollingDelay(post_sipi_delay);
 
     // Add memory barrier to ensure all writes are visible
     ap_sync.memoryBarrier();
@@ -1679,8 +1768,8 @@ fn sendInitSipiSipi(apic_id: u8) !void {
     const loaded_cpu_id = @as(*volatile u32, @ptrFromInt(0x544)).*;
     const array_addr = @as(*volatile u64, @ptrFromInt(0x548)).*;
     const array_offset = @as(*volatile u32, @ptrFromInt(0x550)).*;
-    const stack_loaded = @as(*volatile u32, @ptrFromInt(0x55C)).*;
-    const before_entry = @as(*volatile u32, @ptrFromInt(0x560)).*;
+    const stack_loaded = @as(*volatile u32, @ptrFromInt(0x560)).*;
+    const before_entry = @as(*volatile u32, @ptrFromInt(0x564)).*;
     const entry_addr = @as(*volatile u64, @ptrFromInt(0x568)).*;
     const before_jump = @as(*volatile u32, @ptrFromInt(0x570)).*;
 
@@ -1688,21 +1777,28 @@ fn sendInitSipiSipi(apic_id: u8) !void {
     serial.println("[SMP]     CPU ID loaded: {} (at 0x544)", .{loaded_cpu_id});
     serial.println("[SMP]     Stack array addr: 0x{x} (at 0x548)", .{array_addr});
     serial.println("[SMP]     Array offset: {} (at 0x550)", .{array_offset});
-    serial.println("[SMP]     Stack loaded marker: 0x{x} (at 0x55C, should be 0x8888)", .{stack_loaded});
-    serial.println("[SMP]     Before entry marker: 0x{x} (at 0x560, should be 0x9999)", .{before_entry});
+    serial.println("[SMP]     Stack loaded marker: 0x{x} (at 0x560, should be 0x8888)", .{stack_loaded});
+    serial.println("[SMP]     Before entry marker: 0x{x} (at 0x564, should be 0x9999)", .{before_entry});
     serial.println("[SMP]     Entry point addr: 0x{x} (at 0x568)", .{entry_addr});
     serial.println("[SMP]     Before jump marker: 0x{x} (at 0x570, should be 0xAAAA)", .{before_jump});
-    // Check the new error markers
-    const new_stack_error = @as(*volatile u32, @ptrFromInt(0x590)).*;
-    const bad_stack_value = @as(*volatile u64, @ptrFromInt(0x598)).*;
-    const new_entry_error = @as(*volatile u32, @ptrFromInt(0x59C)).*;
-    const bad_entry_value = @as(*volatile u64, @ptrFromInt(0x5A0)).*;
 
-    if (new_stack_error != 0) {
-        serial.println("[SMP]     ERROR: Stack error at 0x590: 0x{x}, bad stack value: 0x{x}", .{ new_stack_error, bad_stack_value });
+    // Check for normal path markers that might conflict with error markers
+    const before_gdt_marker = @as(*volatile u32, @ptrFromInt(0x590)).*;
+    const after_gdt_marker = @as(*volatile u32, @ptrFromInt(0x594)).*;
+    serial.println("[SMP]     Before kernel GDT marker: 0x{x} (at 0x590, should be 0xBBBB)", .{before_gdt_marker});
+    serial.println("[SMP]     After kernel GDT marker: 0x{x} (at 0x594, should be 0xCCCC)", .{after_gdt_marker});
+
+    // Check for error markers at non-conflicting addresses
+    const new_stack_error = @as(*volatile u32, @ptrFromInt(0x5C0)).*;
+    const bad_stack_value = @as(*volatile u64, @ptrFromInt(0x5C8)).*;
+    const new_entry_error = @as(*volatile u32, @ptrFromInt(0x5D0)).*;
+    const bad_entry_value = @as(*volatile u64, @ptrFromInt(0x5D8)).*;
+
+    if (new_stack_error == 0xBAD57ACC) {
+        serial.println("[SMP]     ERROR: Stack error at 0x5C0: 0x{x}, bad stack value: 0x{x}", .{ new_stack_error, bad_stack_value });
     }
-    if (new_entry_error != 0) {
-        serial.println("[SMP]     ERROR: Entry error at 0x59C: 0x{x}, bad entry value: 0x{x}", .{ new_entry_error, bad_entry_value });
+    if (new_entry_error == 0xBADC0DED) {
+        serial.println("[SMP]     ERROR: Entry error at 0x5D0: 0x{x}, bad entry value: 0x{x}", .{ new_entry_error, bad_entry_value });
     }
 
     // Check halt marker
@@ -1711,12 +1807,16 @@ fn sendInitSipiSipi(apic_id: u8) !void {
         serial.println("[SMP]     Halt marker: 0x{x} (AP reached halt before jump)", .{halt_marker});
     }
 
-    // Check new HALT marker at 0x5A8
-    const debug_halt_marker = @as(*volatile u32, @ptrFromInt(0x5A8)).*;
-    if (debug_halt_marker == 0x48414C54) { // "HALT"
-        serial.println("[SMP]     DEBUG: AP HALTED before kernel jump! This confirms AP reached 64-bit mode successfully.", .{});
-        serial.println("[SMP]     The issue is with jumping to the kernel entry point.", .{});
-    }
+    // Check GDTR verification values
+    const gdtr_limit = @as(*volatile u16, @ptrFromInt(0x5A8)).*;
+    const gdtr_base = @as(*volatile u32, @ptrFromInt(0x5AC)).*;
+    serial.println("[SMP]     GDTR verification - limit: 0x{x}, base: 0x{x}", .{ gdtr_limit, gdtr_base });
+
+    // Check lretq markers
+    const before_lretq = @as(*volatile u32, @ptrFromInt(0x5A0)).*;
+    const after_lretq = @as(*volatile u32, @ptrFromInt(0x5A4)).*;
+    serial.println("[SMP]     Before lretq marker: 0x{x} (at 0x5A0, should be 0xDDDD)", .{before_lretq});
+    serial.println("[SMP]     After lretq marker: 0x{x} (at 0x5A4, should be 0xEEEE)", .{after_lretq});
 
     // Check debug flow markers
     const before_delay = @as(*volatile u32, @ptrFromInt(0x534)).*;
@@ -1751,9 +1851,16 @@ fn sendInitSipiSipi(apic_id: u8) !void {
         serial.println("[SMP]     Unreachable marker: 0x{x} (should not see this)", .{loop_marker});
     }
 
-    serial.println("[SMP]   Zig entry markers:", .{});
-    serial.println("[SMP]     Marker at 0x5B0: 0x{x} (should be 0xDEADC0DE if reached Zig)", .{zig_marker});
-    serial.println("[SMP]     CPU ID at 0x5B4: {} (should match CPU ID if reached Zig)", .{zig_cpu_id});
+    serial.println("[SMP]   Jump target markers:", .{});
+    if (zig_marker == 0xDEADC0DE) {
+        serial.println("[SMP]     ✓ AP REACHED ZIG CODE! Marker=0x{x}, CPU={}", .{ zig_marker, zig_cpu_id });
+    } else if (zig_marker == 0xCAFEBABE) {
+        serial.println("[SMP]     AP wrote pre-jump marker (0xCAFEBABE) but did NOT reach Zig code", .{});
+        serial.println("[SMP]     CPU ID from assembly: {}", .{zig_cpu_id});
+    } else {
+        serial.println("[SMP]     Marker at 0x5B0: 0x{x} (expecting 0xCAFEBABE from asm or 0xDEADC0DE from Zig)", .{zig_marker});
+        serial.println("[SMP]     CPU ID at 0x5B4: {}", .{zig_cpu_id});
+    }
 
     // Also dump the first part of the trampoline to verify it looks correct
     serial.println("[SMP] Trampoline first 64 bytes:", .{});
@@ -1798,8 +1905,13 @@ pub fn startAllAPs(processor_info: []const per_cpu.ProcessorInfo) !void {
         }
     }
 
-    // Wait for all APs to reach ready state
-    if (!ap_debug.waitForStage(.SignaledReady, 2000)) { // 2 second timeout
+    // Use the new validator to check AP startup
+    const validator = ap_state_validator.ApStateValidator;
+
+    // Validate all APs have started
+    validator.validateAllAPs(ap_count, 2000) catch |err| {
+        serial.println("[SMP] AP validation failed: {s}", .{@errorName(err)});
+
         // Print detailed debug info
         const summary = ap_debug.getApSummary();
         serial.println("[SMP] AP startup incomplete. Summary:", .{});
@@ -1811,7 +1923,9 @@ pub fn startAllAPs(processor_info: []const per_cpu.ProcessorInfo) !void {
 
         // Dump debug info to memory for debugger
         ap_debug.dumpDebugInfo();
-    }
+
+        // Continue with partial APs rather than failing completely
+    };
 
     // Release the startup barrier to let APs proceed
     ap_startup_barrier.release();

@@ -11,6 +11,7 @@ pub const ap_debug = @import("smp/ap_debug.zig");
 pub const ipi = @import("smp/ipi.zig");
 pub const ap_cpu_init = @import("smp/ap_cpu_init.zig");
 pub const smp_test = @import("smp/tests.zig");
+pub const ap_state_validator = @import("smp/ap_state_validator.zig");
 
 // Test modules
 pub const tests = @import("smp/tests/tests.zig");

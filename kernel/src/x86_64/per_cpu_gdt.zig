@@ -102,6 +102,13 @@ pub fn initializeForCpu(cpu_id: u32) !void {
     // Initialize TSS for this CPU
     per_cpu_tss[cpu_id] = std.mem.zeroes(gdt.TSS);
 
+    // CRITICAL: Set up minimal TSS with I/O permission bitmap for early boot
+    // Without this, any I/O operation will cause #GP fault on APs
+    per_cpu_tss[cpu_id].iopb_offset = @sizeOf(gdt.TSS); // IOPB immediately after TSS
+    // Note: The actual IOPB will be set up later by io_security module
+    // For now, the offset points past the TSS, which means all I/O is denied by default
+    // This is safer than allowing all I/O
+
     // Set TSS descriptor in GDT
     const tss_addr = @intFromPtr(&per_cpu_tss[cpu_id]);
     const tss_desc = createTSSDescriptor(tss_addr, @sizeOf(gdt.TSS) - 1);

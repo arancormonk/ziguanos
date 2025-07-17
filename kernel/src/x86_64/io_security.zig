@@ -182,8 +182,15 @@ fn checkIOPermission(port: u16) void {
     // Minimum security even when disabled
     if (security_phase == .Disabled) {
         if (!isEssentialBootPort(port)) {
-            serial.print("[SECURITY] Unauthorized I/O access to port 0x{X} during boot\n", .{port});
-            handleSecurityViolation(port, getCurrentPrivilegeLevel());
+            // CRITICAL: Do NOT use serial.print here as it causes recursive I/O!
+            // During early boot (especially AP startup), we cannot do any I/O
+            // that isn't absolutely essential. Just record the violation.
+            _ = violation_count.fetchAdd(1, .monotonic);
+            last_violation_port = port;
+            // Only handle violation if we won't cause recursion
+            if (port < 0x3F8 or port > 0x3FF) { // Not a serial port
+                handleSecurityViolation(port, getCurrentPrivilegeLevel());
+            }
         }
         return;
     }

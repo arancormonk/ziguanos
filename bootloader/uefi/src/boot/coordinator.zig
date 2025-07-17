@@ -18,6 +18,7 @@ const page_table_calculator = @import("page_table_calculator.zig");
 const page_table_allocator = @import("page_table_allocator.zig");
 const boot_protocol = @import("shared");
 const memory = @import("memory.zig");
+const mp_manager = @import("../mp_manager.zig");
 
 // Main boot coordination function
 pub fn boot(handle: uefi.Handle) !void {
@@ -52,6 +53,18 @@ pub fn boot(handle: uefi.Handle) !void {
 
     // Print security violation summary
     policy.printViolationSummary() catch {};
+
+    // Phase 4.5: Gather MP Services information
+    console.println("Gathering MP information...");
+    const mp_info = mp_manager.gatherMpInfo(uefi_globals.boot_services) catch |err| blk: {
+        serial.print("[UEFI] WARNING: Failed to gather MP info: {}\r\n", .{err}) catch {};
+        // Use default values
+        break :blk mp_manager.MpInfo{
+            .total_processors = 1,
+            .enabled_processors = 1,
+            .bsp_id = 0,
+        };
+    };
 
     // Phase 5: Calculate and allocate page tables
     console.println("Calculating page table requirements...");
@@ -102,6 +115,21 @@ pub fn boot(handle: uefi.Handle) !void {
             page_table_info.pd_table_count,
             page_table_info.pt_table_base,
             page_table_info.pt_table_count,
+        }) catch {};
+
+        // Also set MP info
+        boot_info.mp_info = boot_protocol.MpServicesInfo{
+            .available = (mp_info.total_processors > 1),
+            .total_processors = @intCast(mp_info.total_processors),
+            .enabled_processors = @intCast(mp_info.enabled_processors),
+            .bsp_id = @intCast(mp_info.bsp_id),
+            .ap_initialized_by_uefi = (mp_info.total_processors > 1), // Assume APs are initialized if present
+            ._reserved = .{ 0, 0, 0 },
+        };
+        serial.print("[UEFI] Set MP info in boot_info: total={}, enabled={}, BSP={}\r\n", .{
+            mp_info.total_processors,
+            mp_info.enabled_processors,
+            mp_info.bsp_id,
         }) catch {};
     }
 
@@ -207,6 +235,9 @@ fn prepareMemoryMapAndExitBootServices(handle: uefi.Handle) !memory_manager.Memo
         console.waitForKeypress();
         error_handler.uefiError(.out_of_resources);
     };
+
+    // Disable all APs before exiting boot services (UEFI requirement)
+    mp_manager.disableAllAPs(uefi_globals.boot_services);
 
     // Exit boot services
     console.println("Exiting boot services...");
