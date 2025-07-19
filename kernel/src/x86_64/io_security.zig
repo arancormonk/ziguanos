@@ -967,15 +967,10 @@ fn allocateExtendedTSS() !*ExtendedTSS {
     // Allocate memory for extended TSS (must be aligned to page boundary)
     const pmm = @import("../memory/pmm.zig");
     const extended_tss_pages = (tss_size + 4095) / 4096;
-    serial.println("[IO_SEC] About to allocate {} pages for TSS (size: {} bytes)", .{ extended_tss_pages, tss_size });
-    serial.flush();
     const extended_tss_addr = pmm.allocPagesTagged(extended_tss_pages, .SECURITY) orelse {
         serial.println("[IO_SEC] ERROR: Failed to allocate {} pages for TSS", .{extended_tss_pages});
         return error.OutOfMemory;
     };
-
-    serial.println("[IO_SEC] Allocated TSS at physical address: 0x{x}", .{extended_tss_addr});
-    serial.flush();
 
     // Ensure cleanup on error
     errdefer pmm.freePages(extended_tss_addr, extended_tss_pages);

@@ -11,82 +11,19 @@ const runtime_info = @import("../boot/runtime_info.zig");
 const heap = @import("heap.zig");
 const error_utils = @import("../lib/error_utils.zig");
 
-// Virtual memory layout for x86_64 (following Linux/BSD conventions)
-// Currently using identity mapping, but reserving address space for future higher-half kernel
-//
-// Layout (48-bit addressing):
-// 0x0000000000000000 - 0x00007fffffffffff : User space (128 TB) - future use
-// 0x0000800000000000 - 0xffff7fffffffffff : Non-canonical hole
-// 0xffff800000000000 - 0xffffffffffffffff : Kernel space (128 TB) - future use
-//
-// Current identity-mapped layout (temporary until we move to higher-half):
-// 0x0000000000000000 - 0x0000000000200000 : Reserved (2MB)
-// 0x0000000000200000 - kernel_end        : Kernel text/data
-// kernel_end         - 0x0000000100000000 : Available for allocations
-// 0x0000000100000000+                    : High memory / devices
-//
-// Planned future layout (similar to Linux):
-// 0xffff888000000000 - 0xffffc87fffffffff : Direct physical mapping (64 TB)
-// 0xffffc90000000000 - 0xffffe8ffffffffff : vmalloc/ioremap space (32 TB)
-// 0xffffea0000000000 - 0xffffeaffffffffff : Virtual memory map (1 TB)
-// 0xfffff80000000000 - 0xfffffbffffffffff : KASAN shadow memory (16 TB)
-// 0xfffffc0000000000 - 0xfffffdffffffffff : Unused hole (2 TB)
-// 0xfffffe0000000000 - 0xffffffffffffffff : Kernel text mapping (2 TB)
-
+// Virtual memory layout - dynamic based on kernel load address
 const KERNEL_HEAP_SIZE = 1024 * 1024 * 1024; // 1GB initial heap
 
-// Virtual memory regions (for future use when we switch to higher-half)
-const VMALLOC_START = 0xffffc90000000000;
-const VMALLOC_END   = 0xffffe8ffffffffff;
-const DIRECT_MAP_START = 0xffff888000000000;
-const DIRECT_MAP_END   = 0xffffc87fffffffff;
-
-// Get kernel heap start - place in dedicated region
+// Get kernel heap start dynamically - place it at higher half but offset by KASLR
 fn getKernelHeapStart() u64 {
-    // For now, while using identity mapping, place heap in a dedicated area
-    // that won't conflict with kernel or other allocations
-    
-    // Strategy: Use a fixed region that's typically available
-    // Most systems have free memory between 32MB-256MB
-    const HEAP_REGION_START = 0x2000000; // 32MB - safe distance from kernel
-    
-    // Verify this region is available
-    const MIN_HEAP_CHECK = 16 * 1024 * 1024; // Need at least 16MB initially
-    
-    if (!pmm.isReserved(HEAP_REGION_START, MIN_HEAP_CHECK)) {
-        return HEAP_REGION_START;
-    }
-    
-    // If 32MB region is taken, try higher addresses
-    const candidates = [_]u64{
-        0x4000000,  // 64MB
-        0x8000000,  // 128MB
-        0x10000000, // 256MB
-        0x20000000, // 512MB
-    };
-    
-    for (candidates) |addr| {
-        if (!pmm.isReserved(addr, MIN_HEAP_CHECK)) {
-            serial.println("[VMM] Placing heap at 0x{x:0>8} ({} MB)", .{ addr, addr / (1024 * 1024) });
-            return addr;
-        }
-    }
-    
-    // Last resort - scan for available space
+    // Place heap within the kernel's 4KB-mapped region
+    // The kernel maps its own region with 4KB pages for W^X protection
     const info = runtime_info.getRuntimeInfo();
     const kernel_end = info.kernel_virtual_base + info.kernel_size;
-    var scan_addr = (kernel_end + 0xFFFFFF) & ~@as(u64, 0xFFFFFF); // Align to 16MB
-    
-    while (scan_addr < 0x80000000) { // Scan up to 2GB
-        if (!pmm.isReserved(scan_addr, MIN_HEAP_CHECK)) {
-            serial.println("[VMM] Found heap space at 0x{x:0>8} after scanning", .{scan_addr});
-            return scan_addr;
-        }
-        scan_addr += 0x1000000; // Next 16MB
-    }
-    
-    // This should never happen on a properly configured system
-    @panic("VMM: Unable to find suitable heap location");
+    // Align to page boundary (4KB)
+    const aligned_end = (kernel_end + 0xFFF) & ~@as(u64, 0xFFF);
+    // Add small gap but stay within the 4KB-mapped region
+    return aligned_end + 0x10000; // Add 64KB gap after kernel
 }
 
 // Page table entry helpers
@@ -96,8 +33,8 @@ fn makeTableEntry(phys_addr: u64, flags: u64) u64 {
 
 // Get or create page table
 fn getOrCreateTable(table: *[512]u64, index: usize, flags: u64) !*[512]u64 {
-    // Stack guard disabled here - this function is called too frequently
-    // and causes stack guard nesting issues
+    var guard = stack_security.protect();
+    defer guard.deinit();
 
     // Check if this is a huge page that needs to be split
     if ((table[index] & paging.PAGE_HUGE) != 0) {
@@ -158,8 +95,8 @@ fn getOrCreateTable(table: *[512]u64, index: usize, flags: u64) !*[512]u64 {
 
 // Map virtual address to physical address
 pub fn mapPage(virt_addr: u64, phys_addr: u64, flags: u64) !void {
-    // Stack guard disabled here - this function is called too frequently
-    // and causes stack guard nesting issues
+    var guard = stack_security.protect();
+    defer guard.deinit();
 
     // For addresses that are already covered by huge pages, we need to use the paging module directly
     // The paging module knows how to split huge pages properly
@@ -202,7 +139,8 @@ pub fn mapPage(virt_addr: u64, phys_addr: u64, flags: u64) !void {
 
 // Unmap virtual address
 pub fn unmapPage(virt_addr: u64) void {
-    // Stack guard disabled here for consistency with mapPage
+    var guard = stack_security.protect();
+    defer guard.deinit();
 
     const pml4_idx = (virt_addr >> 39) & 0x1FF;
     const pdpt_idx = (virt_addr >> 30) & 0x1FF;
@@ -270,13 +208,6 @@ fn mapPageBootstrap(virt_addr: u64, phys_addr: u64, flags: u64) !void {
 fn getOrCreateTableBootstrap(table: *[512]u64, index: usize, flags: u64) !*[512]u64 {
     // Check if entry is present and if it's a huge page
     const entry = table[index];
-
-    // Check if this is a huge page that needs to be split
-    if ((entry & paging.PAGE_HUGE) != 0) {
-        serial.println("[VMM] ERROR: Bootstrap mapping encountered huge page at index {} with entry 0x{x:0>16}", .{ index, entry });
-        serial.println("[VMM] Bootstrap mapping cannot split huge pages - use regular mapPage instead", .{});
-        return error.HugePageInPath;
-    }
 
     if ((entry & paging.PAGE_PRESENT) == 0) {
         // Allocate new page table using PMM with PAGE_TABLE tag
@@ -390,17 +321,12 @@ var in_heap_init: bool = false;
 var heap_ready: bool = false; // Different from heap_initialized - means safe to use
 
 // Kernel heap management
-var heap_start: u64 = 0; // Initialized in init()
-var heap_current: u64 = 0; // Initialized in init()
-var heap_end: u64 = 0; // Initialized in init()
+var heap_current: u64 = 0; // Initialized in initHeap()
+var heap_end: u64 = 0; // Initialized in initHeap()
 var heap_initialized: bool = false;
 
 // Initialize virtual memory manager
 pub fn init() !void {
-    // Create stack guard for this function
-    var guard = stack_security.protect();
-    defer guard.deinit();
-    
     // Prevent recursion
     if (in_heap_init) {
         return error.RecursiveInit;
@@ -415,7 +341,7 @@ pub fn init() !void {
     serial.println("[VMM] Starting VMM initialization...", .{});
 
     // Phase 1: Setup heap region
-    heap_start = getKernelHeapStart();
+    const heap_start = getKernelHeapStart();
     heap_current = heap_start;
     heap_end = heap_start + KERNEL_HEAP_SIZE;
 
@@ -441,20 +367,12 @@ pub fn init() !void {
         const offset = i * 4096;
         const page_addr = heap_start + offset;
 
-        // Check if this address is in the identity-mapped region (which uses huge pages)
-        const max_mapped = paging.getHighestMappedPhysicalAddress();
-        if (page_addr < max_mapped) {
-            // Within identity-mapped region - use regular mapPage which can split huge pages
-            try mapPage(page_addr, phys, paging.PAGE_PRESENT | paging.PAGE_WRITABLE | paging.PAGE_NO_EXECUTE);
-        } else {
-            // Beyond identity-mapped region - use bootstrap mapping
-            try mapPageBootstrap(page_addr, phys, paging.PAGE_PRESENT | paging.PAGE_WRITABLE | paging.PAGE_NO_EXECUTE);
-        }
+        // Use bootstrap mapping to avoid heap usage
+        try mapPageBootstrap(page_addr, phys, paging.PAGE_PRESENT | paging.PAGE_WRITABLE | paging.PAGE_NO_EXECUTE);
 
-        // Progress indicator disabled - causes issues with stack guards
-        // if (i % 64 == 0) {
-        //     serial.println("[VMM] Mapped {} pages...", .{i});
-        // }
+        if (i % 64 == 0) {
+            serial.print("[VMM] Mapped {}/{} pages\r", .{ i, initial_pages });
+        }
     }
     serial.println("[VMM] Mapped {}/{} pages", .{ initial_pages, initial_pages });
 
@@ -503,6 +421,7 @@ fn expandHeap(pages: usize) !void {
     if (!heap_ready) return error.HeapNotReady;
 
     // Check if expansion would exceed heap bounds
+    const heap_start = getKernelHeapStart();
     const new_size = (heap_current - heap_start) + (pages * 4096);
     if (new_size > KERNEL_HEAP_SIZE) {
         return error.HeapLimitExceeded;
@@ -541,6 +460,7 @@ pub const HeapStats = struct {
 };
 
 pub fn getHeapStats() HeapStats {
+    const heap_start = getKernelHeapStart();
     const used = heap_current - heap_start;
     const available = heap_end - heap_current;
 
@@ -552,31 +472,6 @@ pub fn getHeapStats() HeapStats {
         .available = available,
         .total = KERNEL_HEAP_SIZE,
     };
-}
-
-// Print current memory layout
-pub fn printMemoryLayout() void {
-    const info = runtime_info.getRuntimeInfo();
-    
-    serial.println("[VMM] Current Memory Layout (Identity Mapped):", .{});
-    serial.println("  0x0000000000000000 - 0x00000000001fffff : Reserved (BIOS/Legacy)", .{});
-    serial.println("  0x{x:0>16} - 0x{x:0>16} : Kernel Code/Data", .{
-        info.kernel_virtual_base,
-        info.kernel_virtual_base + info.kernel_size - 1,
-    });
-    
-    if (heap_initialized) {
-        serial.println("  0x{x:0>16} - 0x{x:0>16} : Kernel Heap", .{
-            heap_start,
-            heap_end - 1,
-        });
-    }
-    
-    serial.println("", .{});
-    serial.println("[VMM] Future Memory Layout (Higher-Half Kernel):", .{});
-    serial.println("  0xffff888000000000 - 0xffffc87fffffffff : Direct Physical Mapping (64 TB)", .{});
-    serial.println("  0xffffc90000000000 - 0xffffe8ffffffffff : vmalloc/ioremap space (32 TB)", .{});
-    serial.println("  0xfffffe0000000000 - 0xffffffffffffffff : Kernel text mapping (2 TB)", .{});
 }
 
 pub fn printInfo() void {

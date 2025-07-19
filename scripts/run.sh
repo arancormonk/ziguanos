@@ -12,35 +12,8 @@ SERIAL_LOG="$PROJECT_ROOT/serial.log"
 QEMU_LOG="$PROJECT_ROOT/qemu.log"
 
 # Parse command line arguments
-SMP_CORES="2"
-MEMORY_MB="1024"
-ACCEL_MODE=""
-
-# Process arguments
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        --kvm)
-            ACCEL_MODE="kvm"
-            shift
-            ;;
-        --tcg)
-            ACCEL_MODE="tcg"
-            shift
-            ;;
-        *)
-            # First non-option argument is SMP_CORES
-            if [[ -z "$SMP_CORES_SET" ]]; then
-                SMP_CORES=$1
-                SMP_CORES_SET=1
-            # Second non-option argument is MEMORY_MB
-            elif [[ -z "$MEMORY_MB_SET" ]]; then
-                MEMORY_MB=$1
-                MEMORY_MB_SET=1
-            fi
-            shift
-            ;;
-    esac
-done
+SMP_CORES="${1:-2}"
+MEMORY_MB="${2:-1024}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -87,6 +60,7 @@ rm -f "$SERIAL_LOG" "$QEMU_LOG"
 # Prepare QEMU arguments
 QEMU_ARGS=(
     -machine q35,kernel-irqchip=split,smm=on,vmport=off,hpet=off,mem-merge=off,dump-guest-core=on
+    -cpu qemu64,+ssse3,+sse4.1,+sse4.2,+popcnt,+avx,+aes,+xsave,+xsaveopt,-kvm-asyncpf,-kvmclock,+smep,+smap,+nx,check=on,enforce=on
     -smp "$SMP_CORES",maxcpus="$SMP_CORES"
     -m "${MEMORY_MB}M"
     -device intel-iommu,intremap=on,caching-mode=on,aw-bits=48,device-iotlb=on,dma-drain=on
@@ -138,61 +112,17 @@ if [ "$DISABLE_HMAC" = "1" ] || [ ! -f "$BUILD_DIR/ziguanos.conf" ]; then
     bash "$SCRIPT_DIR/create_disk.sh" > /dev/null 2>&1
 fi
 
-# Configure acceleration based on user preference or availability
-if [[ "$ACCEL_MODE" == "kvm" ]]; then
-    # User explicitly requested KVM
-    if [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
-        echo -e "${GREEN}Using KVM acceleration (explicitly requested)${NC}"
-        QEMU_ARGS+=(
-            -cpu host,+ssse3,+sse4.1,+sse4.2,+popcnt,+avx,+aes,+xsave,+xsaveopt,+smep,+smap,+nx,check=on,enforce=on
-            -accel kvm
-            -rtc base=utc,driftfix=slew
-            # Enable guest error reporting
-            -d cpu_reset,guest_errors,unimp
-            -D "$QEMU_LOG"
-        )
-    else
-        echo -e "${RED}ERROR: KVM requested but not available${NC}"
-        exit 1
-    fi
-elif [[ "$ACCEL_MODE" == "tcg" ]]; then
-    # User explicitly requested TCG
-    echo -e "${GREEN}Using TCG acceleration (explicitly requested)${NC}"
-    QEMU_ARGS+=(
-        -cpu max
-        -accel tcg,thread=multi,tb-size=512,split-wx=on
-        -rtc base=utc,driftfix=slew
-        -global kvm-pit.lost_tick_policy=delay
-        # Enable guest error reporting
-        -d cpu_reset,guest_errors,unimp
-        -D "$QEMU_LOG"
-    )
-else
-    # Auto-detect (default behavior)
-    if [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
-        echo -e "${GREEN}Using KVM acceleration${NC}"
-        QEMU_ARGS+=(
-            -cpu host,+ssse3,+sse4.1,+sse4.2,+popcnt,+avx,+aes,+xsave,+xsaveopt,+smep,+smap,+nx,check=on,enforce=on
-            -accel kvm
-            -rtc base=utc,driftfix=slew
-            # Enable guest error reporting
-            -d cpu_reset,guest_errors,unimp
-            -D "$QEMU_LOG"
-        )
-    else
-        echo -e "${YELLOW}KVM not available, falling back to TCG${NC}"
-        echo -e "${YELLOW}For better performance, ensure KVM is enabled and you have access to /dev/kvm${NC}"
-        QEMU_ARGS+=(
-            -cpu max
-            -accel tcg,thread=multi,tb-size=512,split-wx=on
-            -rtc base=utc,driftfix=slew
-            -global kvm-pit.lost_tick_policy=delay
-            # Enable guest error reporting
-            -d cpu_reset,guest_errors,unimp
-            -D "$QEMU_LOG"
-        )
-    fi
-fi
+# Use TCG with strict settings
+echo -e "${GREEN}Using TCG emulation with strict hardware matching${NC}"
+# Add TCG-specific options for better hardware fidelity
+QEMU_ARGS+=(
+    -accel tcg,thread=multi,tb-size=512,split-wx=on
+    -rtc base=utc,driftfix=slew
+    -global kvm-pit.lost_tick_policy=delay
+    # Enable guest error reporting
+    -d cpu_reset,guest_errors,unimp
+    -D "$QEMU_LOG"
+)
 
 # Run QEMU with GUI
 echo -e "${GREEN}Starting QEMU with UEFI (GUI mode)...${NC}"

@@ -24,7 +24,6 @@ pub const MadtEntryType = enum(u8) {
     GicMsiFrame = 13,
     GicRedistributor = 14,
     GicIts = 15,
-    MultiprocessorWakeup = 16,
     _,
 };
 
@@ -127,29 +126,6 @@ pub const ProcessorLocalX2Apic = extern struct {
     }
 };
 
-// Multiprocessor Wakeup Structure (parking protocol)
-pub const MultiprocessorWakeup = extern struct {
-    header: MadtEntryHeader,
-    mailbox_version: u16,
-    reserved: u32,
-    mailbox_address: u64,
-};
-
-// Mailbox structure for MP wakeup
-pub const MpWakeupMailbox = extern struct {
-    command: u16,
-    reserved: u16,
-    apic_id: u32,
-    wakeup_vector: u64,
-    reserved_os: [2032]u8,
-    reserved_firmware: [2048]u8,
-
-    pub const Command = enum(u16) {
-        Noop = 0x0000,
-        Wakeup = 0x0001,
-    };
-};
-
 // Interrupt polarity
 pub const Polarity = enum(u2) {
     ConformToSpec = 0,
@@ -219,7 +195,6 @@ pub const SystemTopology = struct {
     total_cpus: u32,
     local_apic_address: u64,
     has_legacy_pic: bool,
-    mp_wakeup_mailbox: ?u64, // Physical address of MP wakeup mailbox
 };
 
 // I/O APIC information
@@ -243,7 +218,6 @@ pub fn parseMADT(madt: *const MADT, allocator: std.mem.Allocator) !SystemTopolog
     var local_apic_address: u64 = madt.local_apic_address;
     var boot_cpu_id: u32 = 0;
     var found_boot_cpu = false;
-    var mp_wakeup_mailbox: ?u64 = null;
 
     var iter = madt.getEntries();
     while (iter.next()) |entry| {
@@ -297,11 +271,6 @@ pub fn parseMADT(madt: *const MADT, allocator: std.mem.Allocator) !SystemTopolog
                 local_apic_address = override.local_apic_address;
             },
 
-            .MultiprocessorWakeup => {
-                const mp_wakeup = @as(*const MultiprocessorWakeup, @ptrCast(@alignCast(entry)));
-                mp_wakeup_mailbox = mp_wakeup.mailbox_address;
-            },
-
             else => {
                 // Other entry types can be processed as needed
             },
@@ -326,6 +295,5 @@ pub fn parseMADT(madt: *const MADT, allocator: std.mem.Allocator) !SystemTopolog
         .total_cpus = @intCast(processor_count),
         .local_apic_address = local_apic_address,
         .has_legacy_pic = madt.hasLegacyPic(),
-        .mp_wakeup_mailbox = mp_wakeup_mailbox,
     };
 }

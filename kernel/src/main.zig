@@ -91,23 +91,6 @@ pub fn kernelMain(boot_info: *const UEFIBootInfo) noreturn {
     serial.println("[KERNEL] Switching to new kernel stack...", .{});
     serial.flush();
 
-    serial.println("[KERNEL] Stack allocated at phys: 0x{x}, top: 0x{x}", .{ stack_info.phys, stack_info.top });
-    serial.println("[KERNEL] Current RSP: 0x{x}", .{@frameAddress()});
-
-    // Add a memory barrier before stack switch
-    asm volatile ("mfence" ::: "memory");
-
-    // Try to ensure the new stack is accessible by doing a simple test
-    const test_ptr = @as(*volatile u64, @ptrFromInt(stack_info.top - 8));
-    test_ptr.* = 0xDEADBEEF;
-    if (test_ptr.* != 0xDEADBEEF) {
-        serial.println("[KERNEL] ERROR: New stack memory test failed!", .{});
-        serial.flush();
-        @panic("Stack memory not accessible");
-    }
-    serial.println("[KERNEL] Stack memory test passed", .{});
-    serial.flush();
-
     stack_switch.switchStackAndContinue(
         stack_info.top,
         &kernelMainPhase2,

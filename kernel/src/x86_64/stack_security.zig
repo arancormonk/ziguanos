@@ -595,9 +595,8 @@ pub fn canaryGuard() type {
             }
 
             // Verify shadow stack canary
-            if (shadow_stack_top == 0 or shadow_stack_top < self.stack_position) {
+            if (shadow_stack_top == 0 or shadow_stack_top <= self.stack_position) {
                 serial.println("[STACK] ERROR: Shadow stack underflow detected!", .{});
-                serial.println("[STACK] shadow_stack_top={}, stack_position={}", .{ shadow_stack_top, self.stack_position });
                 @panic("Shadow stack corruption");
             }
 

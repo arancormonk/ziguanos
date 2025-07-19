@@ -16,7 +16,7 @@ const spectre_v1 = @import("../x86_64/spectre_v1.zig");
 const bloom_filter = @import("pmm/bloom_filter.zig");
 const free_tracker = @import("pmm/free_tracker.zig");
 const memory_tags = @import("pmm/memory_tags.zig");
-pub const memory_security = @import("pmm/memory_security.zig");
+const memory_security = @import("pmm/memory_security.zig");
 const guard_pages = @import("pmm/guard_pages.zig");
 const statistics = @import("pmm/statistics.zig");
 const reserved_regions = @import("pmm/reserved_regions.zig");
@@ -32,36 +32,8 @@ const PAGES_PER_BITMAP: u64 = 64; // One u64 bitmap entry tracks 64 pages
 // 2. Full phase: Dynamically allocate larger bitmap based on actual memory
 const BOOTSTRAP_BITMAP_SIZE: usize = 16384; // 16K u64s = 128KB bitmap = 4GB RAM
 
-// Legacy x86 Memory Map - first 1MB contains critical reserved regions
-// Reference: https://wiki.osdev.org/Memory_Map_(x86)
-const IVT_START: u64 = 0x0; // Interrupt Vector Table
-const IVT_END: u64 = 0x400; // 1KB
-const BDA_START: u64 = 0x400; // BIOS Data Area
-const BDA_END: u64 = 0x500; // 256 bytes
-const CONVENTIONAL_START: u64 = 0x500; // Safe conventional memory
-const CONVENTIONAL_END: u64 = 0x7C00; // Up to boot sector
-const BOOT_SECTOR_START: u64 = 0x7C00; // Boot sector
-const BOOT_SECTOR_END: u64 = 0x7E00; // 512 bytes
-const EBDA_START: u64 = 0x80000; // Extended BIOS Data Area
-const EBDA_END: u64 = 0xA0000; // 128KB max
-const VGA_START: u64 = 0xA0000; // VGA display memory
-const VGA_END: u64 = 0xC0000; // 128KB
-const ROM_START: u64 = 0xC0000; // ROM/BIOS area
-const ROM_END: u64 = 0x100000; // Up to 1MB
-
-// High memory reserved regions (above 1MB)
-const ISA_HOLE_START: u64 = 0xF00000; // ISA Memory Hole
-const ISA_HOLE_END: u64 = 0x1000000; // 16MB (1MB size)
-const IO_APIC_START: u64 = 0xFEC00000; // I/O APIC MMIO
-const IO_APIC_END: u64 = 0xFEC01000; // 4KB
-const LOCAL_APIC_START: u64 = 0xFEE00000; // Local APIC MMIO
-const LOCAL_APIC_END: u64 = 0xFEE01000; // 4KB (actual reserved: 1MB)
-const HIGH_MMIO_START: u64 = 0xC0000000; // Start of high MMIO region
-const HIGH_MMIO_END: u64 = 0x100000000; // 4GB
-
 // Memory regions
-const PMM_RESERVED_BASE: u64 = 0x100000; // 1MB boundary
-const PMM_SAFE_START: u64 = 0x200000; // Start allocating at 2MB for safety
+const PMM_RESERVED_BASE: u64 = 0x100000; // Reserve first 1MB
 
 // Protected memory ranges that should never be freed or poisoned
 const TRAMPOLINE_START: u64 = 0x8000;
@@ -216,18 +188,10 @@ pub fn init(boot_info: *const uefi_boot.UEFIBootInfo) void {
             conventional_count += 1;
             const num_pages = descriptor.number_of_pages;
 
-            // Skip memory below 2MB to avoid 1MB boundary issues
-            if (descriptor.physical_start >= PMM_SAFE_START) {
+            // Skip memory below 1MB (reserved for legacy)
+            if (descriptor.physical_start >= PMM_RESERVED_BASE) {
                 markPagesAsFreeInitial(descriptor.physical_start, num_pages);
                 free_pages += num_pages;
-            } else if (descriptor.physical_start >= PMM_RESERVED_BASE and
-                descriptor.physical_start + (num_pages * PAGE_SIZE) > PMM_SAFE_START)
-            {
-                // This region spans across 2MB, mark only the part above 2MB as free
-                const start_at_2mb = PMM_SAFE_START;
-                const pages_above_2mb = (descriptor.physical_start + (num_pages * PAGE_SIZE) - PMM_SAFE_START) / PAGE_SIZE;
-                markPagesAsFreeInitial(start_at_2mb, pages_above_2mb);
-                free_pages += pages_above_2mb;
             }
         }
 
@@ -259,50 +223,19 @@ pub fn init(boot_info: *const uefi_boot.UEFIBootInfo) void {
     markPagesAsUsedInitial(bitmap_addr, bitmap_pages);
     reserved_pages += bitmap_pages;
 
-    // Reserve all legacy x86 memory regions below 1MB
-    // These regions are critical for BIOS, hardware, and compatibility
-    serial.print("[PMM] Reserving legacy x86 memory regions...\n", .{});
-
-    // 1. IVT and BDA (0x0-0x500)
-    markPagesAsUsedInitial(IVT_START, 1); // First 4KB page covers IVT+BDA
-    reserved_pages += 1;
-    serial.print("[PMM] Reserved IVT/BDA area (0x0-0x500)\n", .{});
-
-    // 2. AP trampoline area (0x8000-0x9000)
-    markPagesAsUsedInitial(TRAMPOLINE_START, 1);
-    reserved_pages += 1;
+    // Reserve low memory area for AP trampoline (0x8000-0x9000, one 4KB page)
+    // This is critical for SMP initialization
+    const trampoline_pages = 1; // One 4KB page
+    markPagesAsUsedInitial(0x8000, trampoline_pages);
+    reserved_pages += trampoline_pages;
     serial.print("[PMM] Reserved AP trampoline area at 0x8000\n", .{});
 
-    // 3. EBDA (0x80000-0xA0000) - 128KB
-    const ebda_pages = (EBDA_END - EBDA_START) / PAGE_SIZE;
-    markPagesAsUsedInitial(EBDA_START, ebda_pages);
-    reserved_pages += ebda_pages;
-    serial.print("[PMM] Reserved EBDA (0x80000-0xA0000)\n", .{});
-
-    // 4. VGA memory (0xA0000-0xC0000) - 128KB
-    const vga_pages = (VGA_END - VGA_START) / PAGE_SIZE;
-    markPagesAsUsedInitial(VGA_START, vga_pages);
-    reserved_pages += vga_pages;
-    serial.print("[PMM] Reserved VGA memory (0xA0000-0xC0000)\n", .{});
-
-    // 5. ROM/BIOS area (0xC0000-0x100000) - 256KB
-    const rom_pages = (ROM_END - ROM_START) / PAGE_SIZE;
-    markPagesAsUsedInitial(ROM_START, rom_pages);
-    reserved_pages += rom_pages;
-    serial.print("[PMM] Reserved ROM/BIOS area (0xC0000-0x100000)\n", .{});
-
-    // Reserve high memory MMIO regions
-    serial.print("[PMM] Reserving high memory MMIO regions...\n", .{});
-
-    // Reserve 1MB-2MB region to avoid KVM issues
-    const mb_boundary_pages = (PMM_SAFE_START - PMM_RESERVED_BASE) / PAGE_SIZE;
-    markPagesAsUsedInitial(PMM_RESERVED_BASE, mb_boundary_pages);
-    reserved_pages += mb_boundary_pages;
-    serial.print("[PMM] Reserved 1MB-2MB region for safety\n", .{});
-
-    // Note: ISA Memory Hole and high MMIO regions are typically already marked
-    // as reserved in the UEFI memory map, but we check them in allocPages()
-    // to ensure they're never allocated even if the memory map is incorrect
+    // Reserve debug area for AP startup (0x0-0x1000)
+    // The trampoline writes debug information here during startup
+    const debug_pages = 1; // One 4KB page
+    markPagesAsUsedInitial(0x0, debug_pages);
+    reserved_pages += debug_pages;
+    serial.print("[PMM] Reserved first page (0x0-0x1000) for AP debug area\n", .{});
 
     // Enable guard pages around critical regions
     const max_pages = memory_bitmap.len * PAGES_PER_BITMAP;
@@ -327,11 +260,10 @@ pub fn init(boot_info: *const uefi_boot.UEFIBootInfo) void {
     free_page_tracker = free_tracker.FreePageTracker{};
     tag_tracker = memory_tags.MemoryTagTracker{};
     stats = statistics.Statistics{};
-    // Don't enable zeroing here - it will be enabled after VMM init to avoid KVM issues
-    // memory_security.setZeroOnAlloc(true);
+    memory_security.setZeroOnAlloc(true);
 
     serial.print("[PMM] Security features initialized:\n", .{});
-    serial.print("  - Memory zeroing on allocation: {s}\n", .{if (memory_security.isZeroOnAllocEnabled()) "enabled" else "disabled (will enable after VMM)"});
+    serial.print("  - Memory zeroing on allocation: enabled\n", .{});
     serial.print("  - Double-free detection: enabled (bloom filter)\n", .{});
     serial.print("  - Bloom filter size: {} KB\n", .{bloom_filter.BLOOM_FILTER_SIZE * 8 / 1024});
     serial.print("  - Bloom filter hash functions: {}\n", .{bloom_filter.BLOOM_FILTER_HASH_COUNT});
@@ -484,17 +416,6 @@ pub fn allocPagesTagged(num_pages: u64, tag: MemoryTag) ?u64 {
     return null;
 }
 
-// Check if an address falls within any reserved MMIO region
-fn isReservedMMIO(addr: u64) bool {
-    // ISA Memory Hole (15-16MB)
-    if (addr >= ISA_HOLE_START and addr < ISA_HOLE_END) return true;
-
-    // High MMIO region (3GB-4GB) - contains APICs and other devices
-    if (addr >= HIGH_MMIO_START and addr < HIGH_MMIO_END) return true;
-
-    return false;
-}
-
 // Allocate multiple contiguous physical pages with security features
 pub fn allocPages(num_pages: u64) ?u64 {
     // No canary guard for performance and to avoid init issues
@@ -518,28 +439,15 @@ pub fn allocPages(num_pages: u64) ?u64 {
         var start_addr: u64 = 0;
         var addr = region.base;
 
-        // Skip reserved low memory regions
-        // The first 2MB contains legacy x86 reserved areas and the problematic 1MB boundary
-        if (addr < PMM_SAFE_START) {
-            // If this region extends past 2MB, start allocating after 2MB
-            if (region.base + region.size > PMM_SAFE_START) {
-                addr = PMM_SAFE_START;
-            } else {
-                // This entire region is below 2MB, skip it
-                continue;
-            }
+        // Skip reserved low memory
+        if (addr < PMM_RESERVED_BASE and region.base + region.size > PMM_RESERVED_BASE) {
+            addr = PMM_RESERVED_BASE;
         }
 
         // Align to page boundary
         addr = (addr + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
 
         while (addr + (num_pages * PAGE_SIZE) <= region.base + region.size) : (addr += PAGE_SIZE) {
-            // Skip any reserved MMIO regions
-            if (isReservedMMIO(addr)) {
-                consecutive = 0;
-                continue;
-            }
-
             // Check if this page is free
             const idx_info = memory_regions.physicalToBitmapIndex(addr) orelse {
                 consecutive = 0;
@@ -571,12 +479,6 @@ pub fn allocPages(num_pages: u64) ?u64 {
                     markPagesAsUsed(start_addr, num_pages);
                     free_pages -= num_pages;
                     stats.recordAllocation();
-
-                    // Debug for TSS allocation hang
-                    if (num_pages >= 3) {
-                        serial.println("[PMM] Allocated {} pages at physical address 0x{x}", .{ num_pages, start_addr });
-                        serial.flush();
-                    }
 
                     // Zero the allocated pages if enabled
                     if (memory_security.isZeroOnAllocEnabled()) {

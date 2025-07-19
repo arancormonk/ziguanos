@@ -23,7 +23,6 @@ const idt = @import("../x86_64/idt.zig");
 const UefiApManager = @import("uefi_ap_manager.zig").UefiApManager;
 const ap_startup_sequence = @import("ap_startup_sequence.zig");
 const boot_protocol = @import("shared");
-const ap_parking = @import("ap_parking.zig");
 const ap_state_validator = @import("ap_state_validator.zig");
 
 // Import the trampoline symbols
@@ -468,52 +467,12 @@ pub fn initAP(cpu_id: u32, apic_id: u8) !void {
         serial.println("", .{});
     }
 
-    // Check if we have ACPI MP wakeup mailbox (for UEFI-initialized APs)
-    const parking_mgr = ap_parking.getParkingManager();
-    const has_mp_wakeup = parking_mgr.mp_wakeup_mailbox != null;
-
-    // Check if UEFI has initialized APs
-    const uefi_aps_initialized = if (uefi_ap_manager) |*manager| manager.mp_info.ap_initialized_by_uefi else false;
-
-    // Send wakeup command through appropriate method
-    if (has_mp_wakeup) {
-        // Use ACPI MP wakeup mailbox
-        serial.println("[SMP] Using ACPI MP wakeup mailbox to wake AP {}...", .{apic_id});
-        parking_mgr.wakeupAp(apic_id, TRAMPOLINE_ADDR) catch |err| {
-            serial.println("[SMP] MP wakeup failed, falling back to INIT-SIPI-SIPI: {s}", .{@errorName(err)});
-            // Fallback to traditional method
-            sendInitSipiSipi(apic_id) catch |err2| {
-                ap_debug.recordApError(cpu_id, @intFromEnum(ApError.InitIPIFailed), ap_debug.DebugFlags.IPI_FAILED);
-                return err2;
-            };
-        };
-    } else if (uefi_aps_initialized) {
-        // UEFI initialized APs but no MP wakeup mailbox
-        // Check if we're running under OVMF/QEMU
-        const cpuid = @import("../x86_64/cpuid.zig");
-        if (cpuid.isRunningUnderQEMU()) {
-            serial.println("[SMP] OVMF/QEMU detected with UEFI-initialized APs", .{});
-            serial.println("[SMP] OVMF does not support INIT-SIPI-SIPI for UEFI APs - skipping AP {}", .{apic_id});
-            serial.println("[SMP] This is a known OVMF limitation", .{});
-            ap_debug.recordApError(cpu_id, @intFromEnum(ApError.StartupTimeout), ap_debug.DebugFlags.OVMF_LIMITATION);
-            // Continue without this AP - OVMF limitation
-            return;
-        } else {
-            // Try INIT-SIPI-SIPI on real hardware
-            serial.println("[SMP] UEFI-initialized AP detected on real hardware, using INIT-SIPI-SIPI for AP {}...", .{apic_id});
-            sendInitSipiSipi(apic_id) catch |err| {
-                ap_debug.recordApError(cpu_id, @intFromEnum(ApError.InitIPIFailed), ap_debug.DebugFlags.IPI_FAILED);
-                return err;
-            };
-        }
-    } else {
-        // Use traditional INIT-SIPI-SIPI
-        serial.println("[SMP] Sending INIT-SIPI-SIPI to APIC ID {}...", .{apic_id});
-        sendInitSipiSipi(apic_id) catch |err| {
-            ap_debug.recordApError(cpu_id, @intFromEnum(ApError.InitIPIFailed), ap_debug.DebugFlags.IPI_FAILED);
-            return err;
-        };
-    }
+    // Send INIT-SIPI-SIPI sequence
+    serial.println("[SMP] Sending INIT-SIPI-SIPI to APIC ID {}...", .{apic_id});
+    sendInitSipiSipi(apic_id) catch |err| {
+        ap_debug.recordApError(cpu_id, @intFromEnum(ApError.InitIPIFailed), ap_debug.DebugFlags.IPI_FAILED);
+        return err;
+    };
 
     // Use validator to check if AP actually started
     const validator = ap_state_validator.ApStateValidator;
@@ -1613,39 +1572,45 @@ fn sendInitSipiSipi(apic_id: u8) !void {
     }
 
     // Intel SDM Table 10-1: Send INIT IPI
-    // Linux uses level-triggered INIT (not edge-triggered)
-    serial.println("[SMP] Sending INIT IPI (level-triggered) to APIC ID {}", .{apic_id});
+    serial.println("[SMP] Sending INIT IPI to APIC ID {}", .{apic_id});
 
-    // Send level-triggered INIT assert (like Linux does)
+    // Intel SDM 10.4.3: Send INIT-deassert first for legacy compatibility
+    // This ensures the AP is in a known state
+    apic_unified.sendIPIFull(apic_id, 0, .Init, .Deassert, .Level, .NoShorthand);
+    busyWait(10000); // Short delay
+
+    // CRITICAL FOR UEFI: Send INIT assert with Level trigger
+    // This provides a stronger reset signal for APs that UEFI has initialized
+    // Some UEFI systems need Level-triggered INIT to properly reset APs
     apic_unified.sendIPIFull(apic_id, 0, .Init, .Assert, .Level, .NoShorthand);
 
-    // Intel SDM 10.4.4: Wait 10ms after INIT IPI
-    serial.println("[SMP] Waiting 10ms after INIT assert...", .{});
-    pitPollingDelay(10_000);
+    // Wait for INIT to take effect
+    pitPollingDelay(1000); // 1ms
 
-    // Linux also deasserts INIT after the delay
-    serial.println("[SMP] Deasserting INIT IPI", .{});
+    // Send INIT de-assert to complete the sequence
     apic_unified.sendIPIFull(apic_id, 0, .Init, .Deassert, .Level, .NoShorthand);
 
-    // Wait for delivery to complete (like Linux's safe_apic_wait_icr_idle)
-    var deassert_wait_count: u32 = 0;
-    while ((apic_unified.readRegister(0x300) & (1 << 12)) != 0 and deassert_wait_count < 1000) {
-        busyWait(1000);
-        deassert_wait_count += 1;
-    }
+    // Intel SDM 10.4.4: Wait 10ms after INIT IPI
+    // Use UEFI-aware delay if available
+    const init_delay = if (uefi_ap_manager) |*manager| manager.getInitDelay() else 10_000;
+    serial.println("[SMP] Waiting {}ms after INIT...", .{init_delay / 1000});
+    pitPollingDelay(init_delay);
+
+    // Additional synchronization delay
+    ap_sync.apStartupDelay(10_000);
 
     // Check ICR status after INIT
     const icr_after_init = apic_unified.readRegister(0x300); // APIC_ICR_LOW
     serial.println("[SMP] ICR after INIT wait: 0x{x}", .{icr_after_init});
 
     // Wait for delivery status to clear
-    var init_wait_count: u32 = 0;
-    while ((apic_unified.readRegister(0x300) & (1 << 12)) != 0 and init_wait_count < 1000) {
+    var wait_count: u32 = 0;
+    while ((apic_unified.readRegister(0x300) & (1 << 12)) != 0 and wait_count < 1000) {
         busyWait(1000);
-        init_wait_count += 1;
+        wait_count += 1;
     }
-    if (init_wait_count > 0) {
-        serial.println("[SMP] Waited {} iterations for INIT delivery status to clear", .{init_wait_count});
+    if (wait_count > 0) {
+        serial.println("[SMP] Waited {} iterations for INIT delivery status to clear", .{wait_count});
     }
 
     // Dump memory to check if it's been overwritten during INIT
@@ -1695,10 +1660,10 @@ fn sendInitSipiSipi(apic_id: u8) !void {
 
     apic_unified.sendIPIFull(apic_id, 0x08, .Startup, .Assert, .Edge, .NoShorthand);
 
-    // Linux uses 10us delay for modern CPUs, 200us for legacy
-    // Since we're on QEMU/OVMF, use 10us like Linux does for modern systems
-    const sipi_delay: u32 = 10;
-    serial.println("[SMP] Waiting {}us between SIPIs (modern CPU delay)...", .{sipi_delay});
+    // Intel SDM 10.4.4: Wait 200us between SIPIs
+    // Use UEFI-aware delay if available
+    const sipi_delay = if (uefi_ap_manager) |*manager| manager.getSipiDelay() else 200;
+    serial.println("[SMP] Waiting {}us between SIPIs...", .{sipi_delay});
     pitPollingDelay(sipi_delay);
 
     // Intel SDM 10.4.4: Send second SIPI
@@ -1718,12 +1683,11 @@ fn sendInitSipiSipi(apic_id: u8) !void {
 
     apic_unified.sendIPIFull(apic_id, 0x08, .Startup, .Assert, .Edge, .NoShorthand);
 
-    // Linux waits another 10us after second SIPI
-    pitPollingDelay(10);
-
-    // Give AP time to start executing (Linux uses 200us total)
-    serial.println("[SMP] Waiting 200us for AP to start...", .{});
-    pitPollingDelay(200);
+    // Add a delay after second SIPI to ensure it completes and avoid race
+    // Use extended delay for UEFI systems
+    const post_sipi_delay = if (uefi_ap_manager) |*manager| manager.getSipiDelay() * 5 else 1000;
+    serial.println("[SMP] Waiting {}ms after second SIPI for AP to start...", .{post_sipi_delay / 1000});
+    pitPollingDelay(post_sipi_delay);
 
     // Add memory barrier to ensure all writes are visible
     ap_sync.memoryBarrier();
@@ -2039,74 +2003,6 @@ export fn apMainEntry(cpu_id: u32) callconv(.C) noreturn {
     while (true) {
         asm volatile ("hlt");
     }
-}
-
-// Extended INIT-SIPI-SIPI sequence for UEFI-initialized APs
-// DEPRECATED: This function now just calls the standard sequence
-// The extended sequence was causing triple faults with UEFI APs
-fn sendInitSipiSipiExtended(apic_id: u8, uefi_initialized: bool) !void {
-    _ = uefi_initialized;
-    return sendInitSipiSipi(apic_id);
-}
-
-// Setup warm reset vector for UEFI APs
-fn setupWarmResetVector() !void {
-    // The warm reset vector is at physical address 0x467
-    // It contains a far pointer (offset:segment) to the reset code
-    const warm_reset_offset = @as(*align(1) volatile u16, @ptrFromInt(0x467)); // Offset (2 bytes)
-    const warm_reset_segment = @as(*align(1) volatile u16, @ptrFromInt(0x469)); // Segment (2 bytes)
-    const warm_reset_flag = @as(*volatile u8, @ptrFromInt(0x472)); // CMOS shutdown status byte
-
-    // Point warm reset vector to our trampoline
-    // Trampoline at 0x8000 = segment 0x0800, offset 0x0000
-    serial.println("[SMP] Setting warm reset vector to 0x0800:0x0000 (physical 0x8000)", .{});
-    warm_reset_offset.* = 0x0000; // Offset within segment
-    warm_reset_segment.* = 0x0800; // Segment (0x8000 >> 4)
-
-    // Set CMOS shutdown status to 0x0A (jump to reset vector without init)
-    warm_reset_flag.* = 0x0A;
-
-    // Ensure writes are visible
-    asm volatile ("mfence" ::: "memory");
-}
-
-// Helper function to clear debug regions
-fn clearDebugRegions() void {
-    const early_marker_1 = @as(*volatile u16, @ptrFromInt(0x510));
-    const early_marker_2 = @as(*volatile u16, @ptrFromInt(0x512));
-    const clear_cr0_marker = @as(*volatile u16, @ptrFromInt(0x516));
-    const clear_exception_marker = @as(*volatile u32, @ptrFromInt(0x518));
-    const clear_pm_marker = @as(*volatile u32, @ptrFromInt(0x51C));
-    const clear_pae_marker = @as(*volatile u32, @ptrFromInt(0x520));
-    const clear_cr3_marker = @as(*volatile u32, @ptrFromInt(0x524));
-    const clear_lme_marker = @as(*volatile u32, @ptrFromInt(0x528));
-    const clear_pg_marker = @as(*volatile u32, @ptrFromInt(0x52C));
-    const clear_stack_debug = @as(*volatile u64, @ptrFromInt(0x558));
-
-    early_marker_1.* = 0;
-    early_marker_2.* = 0;
-    clear_cr0_marker.* = 0;
-    clear_exception_marker.* = 0;
-    clear_pm_marker.* = 0;
-    clear_pae_marker.* = 0;
-    clear_cr3_marker.* = 0;
-    clear_lme_marker.* = 0;
-    clear_pg_marker.* = 0;
-    clear_stack_debug.* = 0;
-
-    // Ensure writes are visible
-    asm volatile ("mfence; lfence" ::: "memory");
-
-    // Flush cache lines
-    var flush_addr: u64 = 0x500;
-    while (flush_addr <= 0x5C0) : (flush_addr += 64) {
-        asm volatile ("clflush (%[addr])"
-            :
-            : [addr] "r" (flush_addr),
-            : "memory"
-        );
-    }
-    asm volatile ("mfence" ::: "memory");
 }
 
 // Get AP startup state for debugging

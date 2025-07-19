@@ -16,7 +16,6 @@ const per_cpu = @import("../smp/per_cpu.zig");
 const cpu_local = @import("../smp/cpu_local.zig");
 const smp_test = @import("../smp/tests.zig");
 const ap_init = @import("../smp/ap_init.zig");
-const ap_parking = @import("../smp/ap_parking.zig");
 const error_utils = @import("../lib/error_utils.zig");
 
 // Store boot info for ACPI initialization
@@ -162,114 +161,18 @@ pub fn init() void {
         serial.println("[KERNEL] ACPI system found", .{});
         serial.flush();
         if (system.getTopology()) |topology| {
-            // Setup MP wakeup mailbox if available
-            if (topology.mp_wakeup_mailbox) |mailbox_addr| {
-                serial.println("[KERNEL] Setting up ACPI MP wakeup mailbox at 0x{x}", .{mailbox_addr});
-                const parking_mgr = ap_parking.getParkingManager();
-                parking_mgr.setupMpWakeupMailbox(mailbox_addr) catch |err| {
-                    serial.println("[KERNEL] Failed to setup MP wakeup mailbox: {s}", .{error_utils.errorToString(err)});
+            if (topology.total_cpus > 1) {
+                serial.println("[KERNEL] Starting Application Processors...", .{});
+                serial.flush();
+
+                ap_init.startAllAPs(topology.processors) catch |err| {
+                    serial.println("[KERNEL] Failed to start APs: {s}", .{error_utils.errorToString(err)});
+                    serial.flush();
+                    // Continue with single CPU operation
                 };
             }
-
-            if (topology.total_cpus > 1) {
-                // Check if we should skip SMP initialization
-                // Skip if we have UEFI-initialized APs and parking failed
-                const skip_smp = false;
-
-                // Debug output
-                serial.println("[KERNEL] Checking SMP skip conditions...", .{});
-                if (saved_boot_info) |boot_info| {
-                    serial.println("[KERNEL]   Boot info available", .{});
-                    serial.println("[KERNEL]   AP initialized by UEFI: {}", .{boot_info.mp_info.ap_initialized_by_uefi});
-                    serial.println("[KERNEL]   AP parking failed: {}", .{boot_info.mp_info.ap_parking_failed});
-                    serial.println("[KERNEL]   MP wakeup mailbox: {?}", .{topology.mp_wakeup_mailbox});
-
-                    if (boot_info.mp_info.ap_initialized_by_uefi and boot_info.mp_info.ap_parking_failed) {
-                        serial.println("[KERNEL] UEFI-initialized APs detected with parking failure", .{});
-                        if (topology.mp_wakeup_mailbox == null) {
-                            serial.println("[KERNEL] No ACPI MP wakeup mailbox available", .{});
-
-                            // Always try INIT-SIPI-SIPI - Linux and Windows succeed with this
-                            serial.println("[KERNEL] Will attempt INIT-SIPI-SIPI despite parking failure", .{});
-                        }
-                    }
-                } else {
-                    serial.println("[KERNEL]   No boot info available", .{});
-                }
-
-                if (skip_smp) {
-                    serial.println("[KERNEL] WARNING: Skipping SMP initialization to avoid triple fault", .{});
-                    serial.println("[KERNEL] Running in single-processor mode", .{});
-                    serial.flush();
-                } else {
-                    serial.println("[KERNEL] Starting Application Processors...", .{});
-                    serial.flush();
-
-                    ap_init.startAllAPs(topology.processors) catch |err| {
-                        serial.println("[KERNEL] Failed to start APs: {s}", .{error_utils.errorToString(err)});
-                        serial.flush();
-                        // Continue with single CPU operation
-                    };
-
-                    // Print SMP summary
-                    const active_cpus = per_cpu.getActiveCpuCount();
-                    if (active_cpus == 1) {
-                        // Check if this is due to OVMF limitations
-                        if (saved_boot_info) |boot_info| {
-                            if (boot_info.mp_info.ap_initialized_by_uefi and
-                                boot_info.mp_info.ap_parking_failed and
-                                topology.mp_wakeup_mailbox == null)
-                            {
-                                const cpuid = @import("../x86_64/cpuid.zig");
-                                if (cpuid.isRunningUnderQEMU()) {
-                                    serial.println("[KERNEL] ==============================================", .{});
-                                    serial.println("[KERNEL] Running in single-processor mode", .{});
-                                    serial.println("[KERNEL] Reason: OVMF/QEMU limitation", .{});
-                                    serial.println("[KERNEL] - UEFI initialized APs but no MP wakeup mailbox", .{});
-                                    serial.println("[KERNEL] - OVMF does not support INIT-SIPI-SIPI for UEFI APs", .{});
-                                    serial.println("[KERNEL] - This is a known virtualization limitation", .{});
-                                    serial.println("[KERNEL] ==============================================", .{});
-                                } else {
-                                    serial.println("[KERNEL] Running in single-processor mode (AP startup failed)", .{});
-                                }
-                            } else {
-                                serial.println("[KERNEL] Running in single-processor mode", .{});
-                            }
-                        } else {
-                            serial.println("[KERNEL] Running in single-processor mode", .{});
-                        }
-                    } else {
-                        serial.println("[KERNEL] SMP initialization complete: {} CPUs active", .{active_cpus});
-                    }
-                    serial.flush();
-                }
-            }
         }
     }
-}
-
-// Check if we should skip SMP initialization
-fn shouldSkipSMP() bool {
-    // Check if we're running under QEMU with UEFI
-    if (saved_boot_info) |boot_info| {
-        // Check if APs were initialized by UEFI
-        if (boot_info.mp_info.ap_initialized_by_uefi) {
-            // Check if we have MP wakeup mailbox support
-            if (acpi.getSystem()) |system| {
-                if (system.getTopology()) |topology| {
-                    if (topology.mp_wakeup_mailbox == null) {
-                        // No MP wakeup mailbox for UEFI APs
-                        // For now, allow SMP but with special handling
-                        serial.println("[KERNEL] WARNING: UEFI-initialized APs detected without MP wakeup mailbox", .{});
-                        serial.println("[KERNEL] Will attempt INIT-SIPI-SIPI with UEFI workarounds", .{});
-                        // Don't skip - let the SMP code try with workarounds
-                        return false;
-                    }
-                }
-            }
-        }
-    }
-    return false;
 }
 
 // Prepare for interrupt enabling

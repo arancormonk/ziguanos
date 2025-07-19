@@ -226,9 +226,3 @@ pub fn getIpiPending() u32 {
     const cpu = getCurrentCpu();
     return @atomicLoad(u32, &cpu.ipi_pending, .acquire);
 }
-
-// Get count of active CPUs
-pub fn getActiveCpuCount() u32 {
-    // For now, return the cpu_count which tracks initialized CPUs
-    return cpu_count;
-}
