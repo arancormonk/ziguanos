@@ -36,6 +36,8 @@ pub fn initPhase1(boot_info: *const UEFIBootInfo) !struct { phys: u64, top: u64 
     pmm.init(boot_info);
 
     // Allocate a proper kernel stack now that PMM is available
+    serial.println("[KERNEL] About to allocate kernel stack ({} pages)...", .{KERNEL_STACK_SIZE});
+    serial.flush();
     const kernel_stack_phys = pmm.allocPagesTagged(KERNEL_STACK_SIZE, .KERNEL_DATA) orelse {
         serial.println("[KERNEL] FATAL: Failed to allocate kernel stack", .{});
         serial.flush();
@@ -74,6 +76,11 @@ pub fn initPhase2(kernel_stack_phys: u64, new_stack_top: u64, _: *const UEFIBoot
     };
     vmm.printInfo();
     serial.println("[KERNEL] Virtual memory manager initialized", .{});
+
+    // Enable memory zeroing now that VMM is ready
+    // This was disabled during early boot to avoid KVM issues with physical memory access
+    pmm.memory_security.setZeroOnAlloc(true);
+    serial.println("[KERNEL] Memory zeroing on allocation enabled", .{});
     serial.flush();
 }
 

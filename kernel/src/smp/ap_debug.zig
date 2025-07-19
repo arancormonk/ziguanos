@@ -68,6 +68,7 @@ pub const DebugFlags = struct {
     pub const STACK_ERROR: u32 = 1 << 5;
     pub const CPU_FEATURE_MISSING: u32 = 1 << 6;
     pub const INVALID_CPU_ID: u32 = 1 << 7;
+    pub const OVMF_LIMITATION: u32 = 1 << 8;
 };
 
 // Global AP debug state

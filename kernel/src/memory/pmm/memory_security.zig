@@ -10,11 +10,15 @@ const stack_security = @import("../../x86_64/stack_security.zig");
 
 pub const POISON_VALUE: u8 = 0xDE; // "Dead" marker for freed pages (legacy - not used anymore)
 
-var zero_on_alloc: bool = true; // Enable memory zeroing by default
+var zero_on_alloc: bool = false; // Disabled by default until VMM is ready
 
 // Zero a memory range securely
 pub fn zeroMemoryRange(addr: u64, size: u64) void {
     if (addr == 0 or size == 0) return;
+
+    // Safety check: Don't attempt to zero memory before VMM is initialized
+    // With KVM, accessing physical addresses directly can cause issues
+    if (!zero_on_alloc) return;
 
     // NEVER zero the AP trampoline area (0x8000-0x9000)
     const TRAMPOLINE_START: u64 = 0x8000;
@@ -31,8 +35,19 @@ pub fn zeroMemoryRange(addr: u64, size: u64) void {
         return; // Silently skip zeroing debug memory
     }
 
+    // Debug for KVM hang
+    if (size > 4096) {
+        serial.println("[MEM_SEC] Zeroing {} bytes at physical address 0x{x}", .{ size, addr });
+        serial.flush();
+    }
+
     const ptr = @as([*]u8, @ptrFromInt(addr));
     @memset(ptr[0..size], 0);
+
+    if (size > 4096) {
+        serial.println("[MEM_SEC] Successfully zeroed memory", .{});
+        serial.flush();
+    }
 
     // Memory barrier to ensure zeroing completes
     asm volatile ("mfence" ::: "memory");

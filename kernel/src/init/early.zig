@@ -28,6 +28,10 @@ pub fn init(boot_info: *const UEFIBootInfo) void {
     // Now safe to initialize serial and continue
     serial.init();
     serial.println("[KERNEL] Ziguanos Kernel", .{});
+
+    // Note: Kexec support would require command line parsing
+    // For now, we'll use the RSDP from boot info if available
+
     serial.println("[KERNEL] Early initialization complete", .{});
     serial.println("[KERNEL] - Boot info validated", .{});
     serial.println("[KERNEL] - CPU state verified", .{});

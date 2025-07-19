@@ -176,15 +176,15 @@ ap_pm_entry:
     movl $0x7777, 0x52C
 
     # Far jump to 64-bit long mode
-    # Use 64-bit code segment selector (0x18)
-    ljmp $0x18, $(ap_lm_entry - ap_trampoline_start + 0x8000)
+    # Use kernel code segment selector (0x08)
+    ljmp $0x08, $(ap_lm_entry - ap_trampoline_start + 0x8000)
 
 # Long mode code (64-bit)
 .code64
 .align 16
 ap_lm_entry:
-    # Load 64-bit data segment (0x20)
-    mov $0x20, %ax
+    # Load kernel data segment (0x10)
+    mov $0x10, %ax
     mov %ax, %ds
     mov %ax, %es
     mov %ax, %fs
@@ -303,7 +303,7 @@ ap_lm_entry:
 
     # Load kernel IDT from fixed location
     # The BSP has written the kernel IDTR to 0x8F10
-    lidt 0x8F10
+    lidt (0x8F10)
 
     # Debug: Mark before loading entry point
     movl $0x9999, 0x564

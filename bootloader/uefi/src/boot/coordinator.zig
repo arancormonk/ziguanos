@@ -56,7 +56,7 @@ pub fn boot(handle: uefi.Handle) !void {
 
     // Phase 4.5: Gather MP Services information
     console.println("Gathering MP information...");
-    const mp_info = mp_manager.gatherMpInfo(uefi_globals.boot_services) catch |err| blk: {
+    var mp_info = mp_manager.gatherMpInfo(uefi_globals.boot_services) catch |err| blk: {
         serial.print("[UEFI] WARNING: Failed to gather MP info: {}\r\n", .{err}) catch {};
         // Use default values
         break :blk mp_manager.MpInfo{
@@ -123,8 +123,9 @@ pub fn boot(handle: uefi.Handle) !void {
             .total_processors = @intCast(mp_info.total_processors),
             .enabled_processors = @intCast(mp_info.enabled_processors),
             .bsp_id = @intCast(mp_info.bsp_id),
-            .ap_initialized_by_uefi = (mp_info.total_processors > 1), // Assume APs are initialized if present
-            ._reserved = .{ 0, 0, 0 },
+            .ap_initialized_by_uefi = mp_info.ap_initialized_by_uefi or mp_info.ap_parking_failed,
+            .ap_parking_failed = mp_info.ap_parking_failed,
+            ._reserved = .{ 0, 0 },
         };
         serial.print("[UEFI] Set MP info in boot_info: total={}, enabled={}, BSP={}\r\n", .{
             mp_info.total_processors,
@@ -135,7 +136,13 @@ pub fn boot(handle: uefi.Handle) !void {
 
     // Phase 7: Prepare for kernel handoff
     console.println("Getting memory map...");
-    const memory_map = try prepareMemoryMapAndExitBootServices(handle);
+    const memory_map = try prepareMemoryMapAndExitBootServices(handle, &mp_info);
+
+    // Update boot_info with final mp_info status after parking attempt
+    if (kernel_info.boot_info) |boot_info| {
+        boot_info.mp_info.ap_parking_failed = mp_info.ap_parking_failed;
+        serial.print("[UEFI] Final MP info: ap_parking_failed={}\r\n", .{mp_info.ap_parking_failed}) catch {};
+    }
 
     // Phase 8: Jump to kernel
     secure_debug.printJumpToKernel(kernel_info.entry_point);
@@ -229,7 +236,7 @@ fn loadAndVerifyKernel(handle: uefi.Handle) !kernel_loader.KernelInfo {
 }
 
 // Get memory map and exit boot services
-fn prepareMemoryMapAndExitBootServices(handle: uefi.Handle) !memory_manager.MemoryMap {
+fn prepareMemoryMapAndExitBootServices(handle: uefi.Handle, mp_info: *mp_manager.MpInfo) !memory_manager.MemoryMap {
     var memory_map = memory_manager.getMemoryMap() catch {
         console.println("Failed to get memory map");
         console.waitForKeypress();
@@ -237,26 +244,69 @@ fn prepareMemoryMapAndExitBootServices(handle: uefi.Handle) !memory_manager.Memo
     };
 
     // Disable all APs before exiting boot services (UEFI requirement)
-    mp_manager.disableAllAPs(uefi_globals.boot_services);
+    // Park APs in a known halt state before ExitBootServices
+    mp_manager.parkAllAPs(uefi_globals.boot_services, mp_info);
+
+    // CRITICAL: If parking failed, we need to handle this specially
+    if (mp_info.ap_parking_failed) {
+        serial.print("[UEFI] WARNING: AP parking failed - APs may not respond to INIT-SIPI-SIPI\r\n", .{}) catch {};
+        serial.print("[UEFI] This is a known limitation with QEMU/OVMF\r\n", .{}) catch {};
+    }
 
     // Exit boot services
     console.println("Exiting boot services...");
     serial.print("[UEFI] Exiting boot services\r\n", .{}) catch {};
 
-    switch (uefi_globals.boot_services.exitBootServices(handle, memory_map.key)) {
-        .success => {},
-        else => {
-            // If failed, we need to get the memory map again
-            serial.print("[UEFI] First exit attempt failed, retrying\r\n", .{}) catch {};
-            memory_map = memory_manager.getMemoryMap() catch {
+    // Linux-style retry pattern for ExitBootServices
+    const max_retries: u32 = 3;
+    var retry_count: u32 = 0;
+
+    while (retry_count < max_retries) : (retry_count += 1) {
+        const status = uefi_globals.boot_services.exitBootServices(handle, memory_map.key);
+        switch (status) {
+            .success => {
+                if (retry_count > 0) {
+                    serial.print("[UEFI] ExitBootServices succeeded after {} retries\r\n", .{retry_count}) catch {};
+                }
+                break;
+            },
+            .invalid_parameter => {
+                // Memory map changed during ExitBootServices
+                serial.print("[UEFI] ExitBootServices failed (attempt {}/{}), memory map changed\r\n", .{ retry_count + 1, max_retries }) catch {};
+
+                if (retry_count < max_retries - 1) {
+                    // Get updated memory map and retry
+                    memory_map = memory_manager.getMemoryMap() catch {
+                        serial.print("[UEFI] Failed to get updated memory map\r\n", .{}) catch {};
+                        error_handler.uefiError(.load_error);
+                    };
+                } else {
+                    // Final attempt failed
+                    serial.print("[UEFI] ExitBootServices failed after {} attempts\r\n", .{max_retries}) catch {};
+                    error_handler.uefiError(.load_error);
+                }
+            },
+            else => |err| {
+                // Other error
+                serial.print("[UEFI] ExitBootServices failed with status: {}\r\n", .{err}) catch {};
                 error_handler.uefiError(.load_error);
-            };
-            switch (uefi_globals.boot_services.exitBootServices(handle, memory_map.key)) {
-                .success => {},
-                else => error_handler.uefiError(.load_error),
-            }
-        },
+            },
+        }
     }
+
+    // CRITICAL: Add delay after ExitBootServices to ensure APs are halted
+    // UEFI spec requires APs to be in wait-for-SIPI state after ExitBootServices
+    // but some implementations (like QEMU/OVMF) need time to complete this
+    serial.print("[UEFI] Waiting for APs to halt after ExitBootServices...\r\n", .{}) catch {};
+
+    // Use a simple delay loop since we can't use boot services anymore
+    // Reduced delay for better TCG compatibility (was 100_000_000)
+    var delay_counter: u64 = 0;
+    while (delay_counter < 1_000_000) : (delay_counter += 1) {
+        asm volatile ("pause" ::: "memory");
+    }
+
+    serial.print("[UEFI] AP halt delay complete\r\n", .{}) catch {};
 
     return memory_map;
 }

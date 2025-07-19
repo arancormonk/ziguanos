@@ -98,5 +98,6 @@ pub const MpServicesInfo = extern struct {
     enabled_processors: u32, // Enabled processor count
     bsp_id: u32, // Bootstrap processor ID
     ap_initialized_by_uefi: bool, // Were APs pre-initialized?
-    _reserved: [3]u32, // Reserved for future use
+    ap_parking_failed: bool, // Did AP parking fail?
+    _reserved: [2]u32, // Reserved for future use
 };

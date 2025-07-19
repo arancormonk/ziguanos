@@ -57,7 +57,30 @@ pub fn enable() !void {
         : "memory"
     );
 
-    serial.println("[PAGING] PKU enabled", .{});
+    // Add memory barrier to ensure CR4 write completes
+    asm volatile ("mfence" ::: "memory");
+
+    // Verify CR4.PKE was actually set
+    const cr4_verify = asm volatile ("mov %%cr4, %[result]"
+        : [result] "=r" (-> u64),
+    );
+
+    if ((cr4_verify & CR4_PKE) == 0) {
+        serial.println("[PAGING] Failed to enable PKU - CR4.PKE not set", .{});
+        return error.PKUEnableFailed;
+    }
+
+    // Test PKRU access before declaring success
+    const test_pkru = asm volatile (
+        \\xor %%ecx, %%ecx
+        \\xor %%edx, %%edx
+        \\rdpkru
+        : [ret] "={eax}" (-> u32),
+        :
+        : "ecx", "edx"
+    );
+
+    serial.println("[PAGING] PKU enabled (test PKRU: 0x{x})", .{test_pkru});
 }
 
 // Initialize protection keys with proper access rights
@@ -66,6 +89,10 @@ pub fn init() void {
 
     // Configure protection keys with appropriate access rights
     serial.println("[PKU] Configuring protection keys...", .{});
+
+    // First, ensure PKRU is accessible by reading it
+    const initial_pkru = readPKRU();
+    serial.println("[PKU] Initial PKRU value: 0x{x}", .{initial_pkru});
 
     // Key 0 (kernel_code): Allow read/execute, deny write
     // Note: PKU doesn't control execute permissions, only read/write
@@ -118,10 +145,14 @@ pub fn readPKRU() u32 {
     if (!cpuid.getFeatures().pku) return 0;
 
     // RDPKRU instruction: reads PKRU into EAX, zeroes EDX
-    return asm volatile ("rdpkru"
+    // ECX must also be zero for RDPKRU
+    return asm volatile (
+        \\xor %%ecx, %%ecx
+        \\xor %%edx, %%edx
+        \\rdpkru
         : [ret] "={eax}" (-> u32),
         :
-        : "edx"
+        : "ecx", "edx"
     );
 }
 
@@ -130,11 +161,13 @@ pub fn writePKRU(value: u32) void {
     if (!cpuid.getFeatures().pku) return;
 
     // WRPKRU instruction: writes EAX to PKRU, ECX and EDX must be zero
-    asm volatile ("wrpkru"
+    asm volatile (
+        \\xor %%ecx, %%ecx
+        \\xor %%edx, %%edx
+        \\wrpkru
         :
         : [eax] "{eax}" (value),
-          [ecx] "{ecx}" (@as(u32, 0)),
-          [edx] "{edx}" (@as(u32, 0)),
+        : "ecx", "edx", "memory"
     );
 }
 
