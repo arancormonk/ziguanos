@@ -56,14 +56,29 @@ pub fn apMain(cpu_id: u32, cpu_data: *per_cpu.CpuData) !void {
     );
     ap_debug.setDebugValue(cpu_id, 1, @as(u64, eax) | (@as(u64, edx) << 32)); // Store CPUID info
 
-    // GDT and GSBASE are already set up by ap_early_init
-    // We just need to verify and update debug state
-    ap_debug.updateApStage(cpu_id, .GdtIdtLoaded);
-    ap_debug.updateApStage(cpu_id, .GsBaseSet);
+    // 1. Load per-CPU GDT (Intel SDM Vol 3A Section 3.4.5)
+    // Each processor must have its own GDT to avoid race conditions when updating TSS
+    per_cpu_gdt.initializeForCpu(cpu_id) catch |err| {
+        ap_debug.recordApError(cpu_id, @intFromError(err), ap_debug.DebugFlags.MEMORY_ERROR);
+        return err;
+    };
+    per_cpu_gdt.loadForCpu(cpu_id);
 
-    // Store GSBASE value for debugging
+    // IDT is shared across all CPUs (Intel SDM Vol 3A Section 6.10)
+    // It's already loaded by BSP, no action needed
+    ap_debug.updateApStage(cpu_id, .GdtIdtLoaded);
+
+    // 2. Setup GSBASE for per-CPU access
     const gsbase = @intFromPtr(cpu_data);
-    ap_debug.setDebugValue(cpu_id, 0, gsbase);
+    asm volatile (
+        \\wrmsr
+        :
+        : [msr] "{ecx}" (@as(u32, 0xC0000101)), // GS.base MSR
+          [low] "{eax}" (@as(u32, @truncate(gsbase))),
+          [high] "{edx}" (@as(u32, @truncate(gsbase >> 32))),
+    );
+    ap_debug.updateApStage(cpu_id, .GsBaseSet);
+    ap_debug.setDebugValue(cpu_id, 0, gsbase); // Store GSBASE value for debugging
 
     // 3. Initialize Local APIC
     apic.init() catch |err| {

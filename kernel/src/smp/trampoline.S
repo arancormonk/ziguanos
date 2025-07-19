@@ -144,8 +144,6 @@ ap_pm_entry:
 
     # Intel SDM: Step 2 - Load page table base into CR3
     # The BSP will write the PML4 address to ap_pml4_addr
-    # CRITICAL: Even though we're in 32-bit mode, ap_pml4_addr is 64-bit
-    # We only need the lower 32 bits for CR3 in 32-bit mode
     movl (ap_pml4_addr - ap_trampoline_start + 0x8000), %eax
     mov %eax, %cr3
 
@@ -246,8 +244,8 @@ ap_lm_entry:
     # Store stack pointer as debug value
     movq %rsp, 0x558               # Debug value field (8-byte aligned)
 
-    # Debug: Mark that we loaded stack (must not overlap with stack pointer!)
-    movl $0x8888, 0x560
+    # Debug: Mark that we loaded stack
+    movl $0x8888, 0x55C
 
     # Test if stack is valid (non-zero)
     test %rsp, %rsp
@@ -259,15 +257,9 @@ ap_lm_entry:
     # Debug: Mark before loading kernel GDT
     movl $0xBBBB, 0x590
 
-    # Debug: Read and verify the GDTR at 0x8F00 before loading
-    movw 0x8F00, %ax      # Read limit (should be 0x17)
-    movw %ax, 0x5A8
-    movl 0x8F02, %eax     # Read base low 32 bits (should be 0x8E00)
-    movl %eax, 0x5AC
-
     # Load transition GDT from fixed location
-    # The BSP has created a minimal GDT at 0x8F00 with copies of kernel segments
-    lgdt 0x8F00
+    # The BSP has created a minimal GDT at 0x9100 with copies of kernel segments
+    lgdt 0x9100
 
     # Debug: Mark after lgdt
     movl $0xCCCC, 0x594
@@ -302,11 +294,11 @@ ap_lm_entry:
     movq %r15, %rsp
 
     # Load kernel IDT from fixed location
-    # The BSP has written the kernel IDTR to 0x8F10
-    lidt 0x8F10
+    # The BSP has written the kernel IDTR to 0x9110
+    lidt 0x9110
 
     # Debug: Mark before loading entry point
-    movl $0x9999, 0x564
+    movl $0x9999, 0x560
 
     # Before jumping to the kernel, write a marker to show we made it this far
     movl $0xCAFEBABE, 0x5B0
@@ -345,13 +337,8 @@ ap_lm_entry:
 
     # If we got here, the address is readable
     movl $0x52454144, 0x588  # "READ"
+    jmp halt
 
-    # Push dummy return address to satisfy C ABI
-    # The Zig function expects stack as if it was called with 'call'
-    # Use movq to push a full 64-bit value
-    movq $0xDEADBEEF, %rbx
-    pushq %rbx
-    
     # Jump to kernel entry point
     jmp *%rax
 
@@ -363,17 +350,17 @@ halt:
 
 stack_error:
     # Write error marker for invalid stack
-    movl $0xBAD57ACC, 0x5C0  # "BAD STACC" at different address (moved to avoid conflict)
+    movl $0xBAD57ACC, 0x590  # "BAD STACC" at different address
     # Also write the bad stack value
-    movq %rsp, 0x5C8
+    movq %rsp, 0x598
     hlt
     jmp stack_error
 
 entry_error:
     # Write error marker for invalid entry point
-    movl $0xBADC0DED, 0x5D0  # "BAD CODED" at different address (moved to avoid conflict)
+    movl $0xBADC0DED, 0x59C  # "BAD CODED" at different address
     # Also write the bad entry point value
-    movq %rax, 0x5D8
+    movq %rax, 0x5A0
     hlt
     jmp entry_error
 

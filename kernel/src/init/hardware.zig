@@ -148,11 +148,6 @@ pub fn init() void {
     serial.println("[KERNEL] AP debug test completed", .{});
     serial.flush();
 
-    // Initialize UEFI AP manager if boot info is available
-    if (saved_boot_info) |boot_info| {
-        ap_init.initUefiApManager(boot_info);
-    }
-
     // Start Application Processors if we have ACPI topology information
     serial.println("[KERNEL] Checking for ACPI system...", .{});
     serial.flush();

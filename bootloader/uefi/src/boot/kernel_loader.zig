@@ -154,8 +154,7 @@ pub fn jumpToKernel(kernel_info: KernelInfo, memory_map: MemoryMap) noreturn {
         .has_hardware_rng = boot_info.has_hardware_rng,
         ._padding3 = [_]u8{0} ** 5,
         .page_table_info = boot_info.page_table_info, // Will be set by coordinator
-        .mp_info = boot_info.mp_info, // Will be set by coordinator
-        .reserved = [_]u64{0} ** 13,
+        .reserved = [_]u64{0} ** 21,
     };
 
     // Debug: Print boot info address and magic
